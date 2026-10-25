@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Virtual Env
+env/
+venv/
+.venv/
+Pipfile.lock
+
+# Jupyter / Notebooks
+.ipynb_checkpoints/
+
+# OS & IDE
+.DS_Store
+*.swp
+*.swo
+.vscode/
+
+# YOLO Weights
+
+# Output images
+*.jpg
+*.png
+*.jpeg
+assets/
+
+# ...but keep the bundled sample frame (required by /api/v1/sample) and the
+# reference outputs produced by evaluate_benchmark.py / ipcv_geometry.py
+!Results/
+!Results/*.jpg
+!Results/*.png
+!Results/*.pdf
+!Results/*.json
+!docs/
+!docs/images/
+!docs/images/*.png
+!docs/images/*.jpg
+
+# Docker
+*.pid
+*.tar
+*.sock
+
+# .env files (credentials)
+.env
