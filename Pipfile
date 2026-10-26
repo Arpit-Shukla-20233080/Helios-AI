@@ -1,0 +1,25 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+fastapi = "*"
+uvicorn = "*"
+python-multipart = "*"
+ultralytics = "*"
+torch = "*"
+torchvision = "*"
+pillow = "*"
+pi-heif = "*"
+opencv-python-headless = "*"
+numpy = "*"
+matplotlib = "*"
+psutil = "*"
+thop = "*"
+
+[dev-packages]
+httpx = "*"
+
+[requires]
+python_version = "3.12"
