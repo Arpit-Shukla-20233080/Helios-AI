@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+python-multipart
+ultralytics
+torch
+torchvision
+pillow
+pi-heif
+opencv-python-headless
+numpy
+matplotlib
+psutil
+thop
