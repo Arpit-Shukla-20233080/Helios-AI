@@ -1,0 +1,2243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HELIOS-AI | Solar Panel Thermal Defect Diagnostics</title>
+  <meta name="description" content="Aerial thermography cockpit: YOLOv9 PV defect detection, classical IPCV layers and IEC TS 62446-3 grading.">
+  <!-- Tailwind CSS (Play CDN, pinned) -->
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <!-- Lucide Icons (pinned) -->
+  <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+            display: ['Space Grotesk', 'sans-serif']
+          },
+          colors: {
+            solar: { 50: '#fffbeb', 100: '#fef3c7', 400: '#fbbf24', 500: '#f59e0b', 600: '#d97706', 900: '#78350f' },
+            dark: { 950: '#070a12', 900: '#0b1120', 850: '#0f172a', 800: '#1e293b', 700: '#334155' }
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    :root {
+      --bg: #070a12;
+      --ink: #f1f5f9;
+      --ink-2: #cbd5e1;
+      --muted: #94a3b8;
+      --line: rgba(255, 255, 255, 0.08);
+      --amber: #f59e0b;
+      --critical: #ef4444;
+      --medium: #f59e0b;
+      --minor: #3b82f6;
+      --series: #3987e5;
+      color-scheme: dark;
+    }
+    body {
+      background-color: var(--bg);
+      color: var(--ink);
+      font-family: 'Inter', sans-serif;
+    }
+
+    /* Radar Pulse Animation for Defect Points */
+    @keyframes radar-pulse {
+      0% { transform: scale(0.95); opacity: 0.9; box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+      70% { transform: scale(1.05); opacity: 1; box-shadow: 0 0 0 14px rgba(239, 68, 68, 0); }
+      100% { transform: scale(0.95); opacity: 0.9; box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+    }
+    @keyframes radar-pulse-amber {
+      0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.7); }
+      70% { transform: scale(1.05); box-shadow: 0 0 0 14px rgba(245, 158, 11, 0); }
+      100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+    }
+    @keyframes radar-pulse-blue {
+      0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
+      70% { transform: scale(1.05); box-shadow: 0 0 0 14px rgba(59, 130, 246, 0); }
+      100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+    }
+    .pulse-critical { animation: radar-pulse 2s infinite cubic-bezier(0.4, 0, 0.6, 1); }
+    .pulse-medium { animation: radar-pulse-amber 2.2s infinite cubic-bezier(0.4, 0, 0.6, 1); }
+    .pulse-minor { animation: radar-pulse-blue 2.4s infinite cubic-bezier(0.4, 0, 0.6, 1); }
+
+    /* Custom Glassmorphism */
+    .glass-card {
+      background: rgba(15, 23, 42, 0.75);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--line);
+    }
+
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0b1120; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+    /* ── Viewport stage, zoom layer and image layers ───────────────────── */
+    #imageStage { touch-action: none; }
+    #zoomLayer {
+      --zoom: 1;
+      transform-origin: 0 0;
+      transition: transform 800ms cubic-bezier(0.2, 0.7, 0.2, 1);
+      will-change: transform;
+    }
+    #zoomLayer.no-anim { transition: none; }
+    .layer-img {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0;
+      transition: opacity 320ms ease;
+      pointer-events: none;
+    }
+    .layer-img.visible { opacity: 1; }
+    #boxLayer { transition: opacity 320ms ease; }
+
+    /* Pin markers stay a constant on-screen size at any zoom level */
+    .defect-pin {
+      position: absolute;
+      transform: translate(-50%, -50%) scale(calc(1 / var(--zoom)));
+      cursor: pointer;
+      transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+      z-index: 20;
+      background: none;
+      border: 0;
+      padding: 0;
+    }
+    .defect-pin:hover, .defect-pin:focus-visible { transform: translate(-50%, -50%) scale(calc(1.3 / var(--zoom))); z-index: 30; }
+    .defect-pin.active { transform: translate(-50%, -50%) scale(calc(1.45 / var(--zoom))); z-index: 40; }
+    .defect-pin:focus-visible { outline: none; }
+    .defect-pin:focus-visible .pin-dot { box-shadow: 0 0 0 3px #fff; }
+    .defect-pin .pin-tip { display: none; }
+    .defect-pin:hover .pin-tip, .defect-pin:focus-visible .pin-tip { display: block; }
+    .pins-hidden .defect-pin:not(.active) { opacity: 0.25; }
+
+    .det-box {
+      position: absolute;
+      border: calc(2px / var(--zoom)) solid;
+      border-radius: calc(2px / var(--zoom));
+      pointer-events: none;
+    }
+    .det-box span {
+      position: absolute;
+      left: calc(-2px / var(--zoom));
+      bottom: 100%;
+      transform-origin: 0 100%;
+      transform: scale(calc(1 / var(--zoom)));
+      white-space: nowrap;
+      font: 600 10px/1 'JetBrains Mono', monospace;
+      color: #0b0b0b;
+      padding: 3px 5px;
+      border-radius: 3px 3px 3px 0;
+    }
+
+    #activeReticle {
+      border-width: calc(2px / var(--zoom));
+      transition: left 600ms cubic-bezier(0.2, 0.7, 0.2, 1), top 600ms cubic-bezier(0.2, 0.7, 0.2, 1),
+                  width 600ms cubic-bezier(0.2, 0.7, 0.2, 1), height 600ms cubic-bezier(0.2, 0.7, 0.2, 1);
+    }
+    #activeReticle .corner {
+      position: absolute;
+      width: calc(12px / var(--zoom));
+      height: calc(12px / var(--zoom));
+      border-color: inherit;
+    }
+
+    @keyframes flash-ring {
+      0% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.55); }
+      100% { box-shadow: 0 0 0 18px rgba(245, 158, 11, 0); }
+    }
+    .flash { animation: flash-ring 900ms ease-out; }
+
+    @keyframes fade-up {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: none; }
+    }
+    .fade-up { animation: fade-up 380ms ease-out both; }
+
+    #tourProgressBar { transform-origin: 0 50%; transform: scaleX(0); }
+
+    .layer-btn[aria-pressed="true"] { background: #1e293b; color: #fbbf24; box-shadow: 0 1px 2px rgba(0,0,0,.4); }
+    .crop-btn[aria-pressed="true"] { color: #fbbf24; border-color: rgba(245, 158, 11, 0.5); }
+    .filter-pill[aria-pressed="true"] { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border-color: rgba(245, 158, 11, 0.45); }
+
+    kbd {
+      font: 500 10px/1 'JetBrains Mono', monospace;
+      padding: 2px 5px;
+      border-radius: 4px;
+      border: 1px solid #334155;
+      background: #0f172a;
+      color: #cbd5e1;
+    }
+
+    /* Native dialogs */
+    dialog {
+      background: #0f172a;
+      color: var(--ink);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 16px;
+      padding: 0;
+      max-width: min(92vw, 560px);
+      width: 100%;
+    }
+    dialog.wide { max-width: min(96vw, 1180px); }
+    dialog::backdrop { background: rgba(2, 6, 23, 0.72); backdrop-filter: blur(3px); overflow: hidden; overscroll-behavior: contain; }
+    dialog:modal { overscroll-behavior: contain; max-height: 92vh; overflow: auto; }
+
+    .field-label { display: block; font: 500 11px/1.4 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 4px; }
+    .field-input {
+      width: 100%;
+      background: #0b1120;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 13px;
+      color: var(--ink);
+    }
+    .field-input:focus { outline: 2px solid rgba(245, 158, 11, 0.6); outline-offset: 1px; border-color: transparent; }
+
+    #histTooltip { pointer-events: none; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .pulse-critical, .pulse-medium, .pulse-minor, .flash, .fade-up { animation: none !important; }
+      #zoomLayer, #activeReticle, .layer-img { transition: none !important; }
+      *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }
+    }
+
+    /* ── Printable certificate (hidden on screen) ─────────────────────── */
+    .print-only { display: none; }
+
+    .rpt { font-family: 'Inter', Arial, sans-serif; color: #111827; font-size: 10.5pt; line-height: 1.4; padding: 0 1.5mm; }
+    .rpt-page { position: relative; min-height: 270mm; padding-bottom: 14mm; }
+    .rpt-head { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #b45309; padding-bottom: 10px; }
+    .rpt-brand { display: flex; gap: 10px; align-items: center; }
+    .rpt-logo { width: 38px; height: 38px; border-radius: 9px; background: linear-gradient(135deg, #f59e0b, #dc2626); display: flex; align-items: center; justify-content: center; color: #fff; font: 700 18px 'Space Grotesk', Arial, sans-serif; }
+    .rpt-title { font: 700 17pt/1.15 'Space Grotesk', Arial, sans-serif; letter-spacing: -0.01em; }
+    .rpt-sub { color: #4b5563; font-size: 9pt; }
+    .rpt-meta-right { text-align: right; font-size: 9pt; color: #374151; white-space: nowrap; padding-left: 12px; }
+    .rpt-meta-right b { font-family: 'JetBrains Mono', monospace; color: #111827; }
+    .rpt-compliance { display: flex; gap: 14px; align-items: center; margin: 12px 0; padding: 10px 12px; border: 1.5px solid #047857; border-radius: 10px; background: #ecfdf5; }
+    .rpt-seal { flex: none; width: 64px; height: 64px; border-radius: 50%; border: 3px double #047857; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #047857; font: 700 7pt/1.1 'JetBrains Mono', monospace; text-align: center; }
+    .rpt-compliance h3 { margin: 0; font: 700 11pt 'Space Grotesk', Arial, sans-serif; color: #065f46; }
+    .rpt-compliance p { margin: 2px 0 0; font-size: 8.5pt; color: #065f46; }
+    .rpt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid #d1d5db; border-radius: 8px; overflow: hidden; margin-bottom: 12px; }
+    .rpt-grid div { padding: 5px 9px; border-bottom: 1px solid #e5e7eb; font-size: 9pt; }
+    .rpt-grid div:nth-child(odd) { border-right: 1px solid #e5e7eb; }
+    .rpt-grid span { display: block; font: 600 7pt 'JetBrains Mono', monospace; text-transform: uppercase; color: #6b7280; letter-spacing: .04em; }
+    .rpt-h2 { font: 700 11.5pt 'Space Grotesk', Arial, sans-serif; margin: 12px 0 6px; color: #111827; text-transform: uppercase; letter-spacing: .03em; }
+    .rpt-score { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+    .rpt-tile { border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 9px; }
+    .rpt-tile span { display: block; font: 600 6.8pt 'JetBrains Mono', monospace; text-transform: uppercase; color: #6b7280; }
+    .rpt-tile b { display: block; font: 700 15pt 'Space Grotesk', Arial, sans-serif; margin-top: 2px; }
+    .rpt-tile em { font-style: normal; font-size: 7.5pt; color: #4b5563; }
+    .rpt-figure { display: grid; grid-template-columns: 1.45fr 1fr; gap: 12px; margin-top: 10px; }
+    .rpt-figure img { width: 100%; border: 1px solid #d1d5db; border-radius: 6px; display: block; }
+    .rpt-figure figcaption { font-size: 7.5pt; color: #4b5563; margin-top: 4px; }
+    .rpt-sev-row { display: flex; align-items: center; gap: 8px; margin: 5px 0; font-size: 9pt; }
+    .rpt-sev-bar { flex: 1; height: 9px; background: #f3f4f6; border-radius: 5px; overflow: hidden; }
+    .rpt-sev-bar i { display: block; height: 100%; border-radius: 5px; }
+    .rpt-note { font-size: 8pt; color: #4b5563; border-left: 3px solid #f59e0b; padding: 4px 8px; background: #fffbeb; margin-top: 8px; }
+    .rpt-table { width: 100%; border-collapse: collapse; font-size: 7.7pt; line-height: 1.28; table-layout: fixed; }
+    .rpt-table .nowrap { white-space: nowrap; }
+    .rpt-table th { background: #111827; color: #fff; text-align: left; padding: 5px 5px; font: 600 6.9pt 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: .02em; }
+    .rpt-table td { border-bottom: 1px solid #e5e7eb; padding: 4px 5px; vertical-align: top; overflow-wrap: anywhere; }
+    .rpt-table tr { break-inside: avoid; }
+    .rpt-table tbody tr:nth-child(even) td { background: #f9fafb; }
+    .rpt-table .mono { font-family: 'JetBrains Mono', monospace; font-size: 7.4pt; overflow-wrap: normal; }
+    .rpt-table .dim { color: #6b7280; }
+    .rpt-cls { display: flex; gap: 6px; align-items: flex-start; }
+    .rpt-thumb { width: 32px; height: 32px; flex: none; object-fit: cover; border-radius: 4px; border: 1px solid #d1d5db; }
+    .rpt-sev { display: inline-block; padding: 1px 6px; border-radius: 4px; font: 700 7.5pt 'JetBrains Mono', monospace; color: #fff; white-space: nowrap; }
+    .rpt-method { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; font-size: 7.3pt; line-height: 1.3; color: #374151; }
+    .rpt-method div { border: 1px solid #e5e7eb; border-radius: 8px; padding: 6px 8px; }
+    .rpt-method b { color: #111827; }
+    .rpt-sign { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 10px; break-inside: avoid; }
+    .rpt-sign-box { border: 1px solid #9ca3af; border-radius: 8px; padding: 8px 12px; }
+    .rpt-sign-box h4 { margin: 0 0 20px; font: 700 9pt 'Space Grotesk', Arial, sans-serif; text-transform: uppercase; }
+    .rpt-line { border-bottom: 1px solid #111827; height: 16px; margin-bottom: 3px; }
+    .rpt-stamp { border: 2px dashed #9ca3af; border-radius: 8px; height: 56px; display: flex; align-items: center; justify-content: center; color: #9ca3af; font: 600 8pt 'JetBrains Mono', monospace; }
+    .rpt-foot { position: absolute; bottom: 0; left: 0; right: 0; display: flex; justify-content: space-between; font: 7.5pt 'JetBrains Mono', monospace; color: #6b7280; border-top: 1px solid #e5e7eb; padding-top: 5px; }
+    .rpt-empty { padding: 40px; text-align: center; border: 2px dashed #d1d5db; border-radius: 12px; color: #6b7280; }
+
+    @media print {
+      @page { size: A4 portrait; margin: 11mm 12mm; }
+      html, body { background: #ffffff !important; color: #111827 !important; }
+      .no-print, .app-shell, dialog, #toastHost { display: none !important; }
+      .print-only { display: block !important; }
+      .rpt-page { break-after: page; }
+      .rpt-page:last-child { break-after: auto; }
+      * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    }
+  </style>
+</head>
+<body class="min-h-screen bg-dark-950 text-slate-100 antialiased selection:bg-amber-500 selection:text-black">
+
+<div class="app-shell no-print min-h-screen flex flex-col">
+
+  <!-- Top Navigation & Cockpit Bar -->
+  <header class="sticky top-0 z-50 glass-card border-b border-slate-800/80 px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3 shadow-xl">
+    <div class="flex items-center space-x-3 min-w-0">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 to-red-500 flex items-center justify-center shadow-lg shadow-amber-500/20 flex-none">
+        <i data-lucide="sun-medium" class="w-6 h-6 text-slate-950 stroke-[2.5]"></i>
+      </div>
+      <div class="min-w-0">
+        <div class="flex items-center space-x-2">
+          <h1 class="font-display font-bold text-lg tracking-tight text-white">HELIOS<span class="text-amber-400">AI</span></h1>
+          <span class="hidden sm:inline px-2 py-0.5 rounded text-[10px] font-mono font-semibold tracking-wider bg-amber-500/10 text-amber-400 border border-amber-500/30">
+            IEC TS 62446-3 ALIGNED
+          </span>
+        </div>
+        <p class="text-xs text-slate-400 truncate">Autonomous Aerial Thermography &amp; Solar Anomaly Intelligence</p>
+      </div>
+    </div>
+
+    <!-- Right Cockpit Actions -->
+    <div class="flex flex-wrap items-center gap-2">
+      <div id="engineStatus" class="hidden xl:flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-slate-900/80 border border-slate-800 text-xs font-mono text-slate-400" role="status">
+        <span id="engineDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
+        <span id="engineText">Connecting to inference engine…</span>
+      </div>
+
+      <button id="btnUpload" type="button" class="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 border border-slate-700 flex items-center space-x-2 transition" aria-label="Upload thermal image">
+        <i data-lucide="upload" class="w-4 h-4"></i>
+        <span class="hidden md:inline">Upload</span>
+      </button>
+
+      <button id="btnLoadSample" type="button" class="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-amber-400 border border-amber-500/30 hover:border-amber-400 flex items-center space-x-2 transition shadow-md" aria-label="Load sample drone flight">
+        <i data-lucide="plane" class="w-4 h-4 text-amber-400"></i>
+        <span class="hidden md:inline">Load Sample Drone Flight</span>
+      </button>
+
+      <button id="btnTour" type="button" class="px-3 py-2 rounded-lg bg-gradient-to-r from-sky-500/20 to-indigo-500/20 hover:from-sky-500/30 hover:to-indigo-500/30 text-xs font-semibold text-sky-300 border border-sky-400/40 flex items-center space-x-2 transition" aria-label="Start guided presentation tour">
+        <i data-lucide="presentation" class="w-4 h-4"></i>
+        <span id="btnTourLabel" class="hidden md:inline">⚡ Guided Presentation Tour</span>
+      </button>
+
+      <button id="btnExportReport" type="button" class="px-3 py-2 rounded-lg bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-xs font-semibold text-slate-950 flex items-center space-x-2 transition shadow-lg shadow-amber-500/20" aria-label="Print audit report">
+        <i data-lucide="file-text" class="w-4 h-4 text-slate-950 stroke-[2.5]"></i>
+        <span class="hidden md:inline">Print Audit Report</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Executive KPI Ribbon -->
+  <section class="max-w-[1700px] w-full mx-auto px-4 sm:px-6 pt-5 pb-2" aria-label="Executive KPIs">
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+      <div class="glass-card rounded-xl p-4 border border-slate-800 flex items-center justify-between">
+        <div class="min-w-0">
+          <span class="text-[11px] font-mono uppercase tracking-wider text-slate-400">Array Health Score</span>
+          <div class="flex flex-wrap items-baseline gap-2 mt-1">
+            <span id="kpiHealthScore" class="font-display text-2xl font-bold text-white">--</span>
+            <span id="kpiHealthStatus" class="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">Awaiting Upload</span>
+          </div>
+        </div>
+        <div class="hidden sm:flex w-12 h-12 rounded-xl bg-slate-800/80 border border-slate-700 items-center justify-center flex-none">
+          <i data-lucide="activity" class="w-6 h-6 text-emerald-400"></i>
+        </div>
+      </div>
+
+      <div class="glass-card rounded-xl p-4 border border-slate-800 flex items-center justify-between">
+        <div class="min-w-0">
+          <span class="text-[11px] font-mono uppercase tracking-wider text-slate-400">Defects Detected</span>
+          <div class="flex flex-wrap items-baseline gap-2 mt-1">
+            <span id="kpiTotalDefects" class="font-display text-2xl font-bold text-amber-400">--</span>
+            <span id="kpiDefectBreakdown" class="text-[11px] font-mono text-slate-400">0 Critical | 0 Med | 0 Low</span>
+          </div>
+        </div>
+        <div class="hidden sm:flex w-12 h-12 rounded-xl bg-slate-800/80 border border-slate-700 items-center justify-center flex-none">
+          <i data-lucide="alert-triangle" class="w-6 h-6 text-amber-400"></i>
+        </div>
+      </div>
+
+      <div class="glass-card rounded-xl p-4 border border-slate-800 flex items-center justify-between">
+        <div class="min-w-0">
+          <span class="text-[11px] font-mono uppercase tracking-wider text-slate-400">Dissipated Yield Loss</span>
+          <div class="flex flex-wrap items-baseline gap-2 mt-1">
+            <span id="kpiWattLoss" class="font-display text-2xl font-bold text-red-400">--</span>
+            <span id="kpiWattSub" class="text-[11px] font-mono text-slate-400">Watts Peak</span>
+          </div>
+        </div>
+        <div class="hidden sm:flex w-12 h-12 rounded-xl bg-slate-800/80 border border-slate-700 items-center justify-center flex-none">
+          <i data-lucide="flame" class="w-6 h-6 text-red-400"></i>
+        </div>
+      </div>
+
+      <div class="glass-card rounded-xl p-4 border border-slate-800 flex items-center justify-between">
+        <div class="min-w-0">
+          <span class="text-[11px] font-mono uppercase tracking-wider text-slate-400">Annual Revenue Impact</span>
+          <div class="flex flex-wrap items-baseline gap-2 mt-1">
+            <span id="kpiFinancialLoss" class="font-display text-2xl font-bold text-amber-300">--</span>
+            <span id="kpiFinancialSub" class="text-[11px] font-mono text-slate-400">est. USD / yr</span>
+          </div>
+        </div>
+        <div class="hidden sm:flex w-12 h-12 rounded-xl bg-slate-800/80 border border-slate-700 items-center justify-center flex-none">
+          <i data-lucide="badge-dollar-sign" class="w-6 h-6 text-amber-300"></i>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Main Cockpit Workspace -->
+  <main class="max-w-[1700px] w-full mx-auto px-4 sm:px-6 py-4 flex-1 grid grid-cols-1 lg:grid-cols-12 gap-5">
+
+    <!-- Left & Center: Interactive Viewport -->
+    <div class="lg:col-span-8 flex flex-col space-y-4 min-w-0">
+
+      <!-- Viewport Toolbar -->
+      <div class="glass-card rounded-xl px-3 py-2.5 border border-slate-800 flex flex-wrap items-center justify-between gap-2.5 text-xs">
+        <!-- Palette & Layer Toggles -->
+        <div id="layerGroup" class="flex flex-wrap items-center gap-1 bg-slate-900/90 p-1 rounded-lg border border-slate-800" role="group" aria-label="Image layer">
+          <button type="button" data-layer="raw" class="layer-btn px-2.5 py-1.5 rounded-md font-medium text-slate-400 hover:text-white" aria-pressed="true" title="Raw thermal grayscale (key 1)">Raw Thermal</button>
+          <button type="button" data-layer="ironbow" class="layer-btn px-2.5 py-1.5 rounded-md font-medium text-slate-400 hover:text-white" aria-pressed="false" title="CLAHE + FLIR Ironbow (key 2)">FLIR Ironbow</button>
+          <button type="button" data-layer="sobel" class="layer-btn px-2.5 py-1.5 rounded-md font-medium text-slate-400 hover:text-white" aria-pressed="false" title="Sobel gradient magnitude (key 3)">IPCV: Sobel Gradient</button>
+          <button type="button" data-layer="otsu" class="layer-btn px-2.5 py-1.5 rounded-md font-medium text-slate-400 hover:text-white" aria-pressed="false" title="Otsu threshold (key 4)">IPCV: Otsu Threshold</button>
+          <button type="button" data-layer="contours" class="layer-btn px-2.5 py-1.5 rounded-md font-medium text-slate-400 hover:text-white" aria-pressed="false" title="Module contours + homography target (key 5)">IPCV: Contours</button>
+          <button type="button" data-layer="bbox" class="layer-btn px-2.5 py-1.5 rounded-md font-medium text-slate-400 hover:text-white" aria-pressed="false" title="Model detection boxes (key 6)">Model Detections</button>
+        </div>
+
+        <!-- Filter Pills -->
+        <div class="flex flex-wrap items-center gap-1.5" role="group" aria-label="Severity filter">
+          <span class="text-slate-400 font-mono text-[11px] uppercase mr-0.5">Filter:</span>
+          <button type="button" data-filter="all" aria-pressed="true" class="filter-pill px-2 py-1 rounded-md text-[11px] font-mono font-medium bg-slate-900 text-slate-300 border border-slate-700">All (<span id="countAll">0</span>)</button>
+          <button type="button" data-filter="Class 3" aria-pressed="false" class="filter-pill px-2 py-1 rounded-md text-[11px] font-mono font-medium bg-slate-900 text-red-400 border border-red-500/30 hover:border-red-400">Critical (<span id="countC3">0</span>)</button>
+          <button type="button" data-filter="Class 2" aria-pressed="false" class="filter-pill px-2 py-1 rounded-md text-[11px] font-mono font-medium bg-slate-900 text-amber-400 border border-amber-500/30 hover:border-amber-400">Medium (<span id="countC2">0</span>)</button>
+          <button type="button" data-filter="Class 1" aria-pressed="false" class="filter-pill px-2 py-1 rounded-md text-[11px] font-mono font-medium bg-slate-900 text-blue-400 border border-blue-500/30 hover:border-blue-400">Low (<span id="countC1">0</span>)</button>
+        </div>
+
+        <!-- Confidence Slider -->
+        <label class="flex items-center space-x-2.5 bg-slate-900/90 px-3 py-1.5 rounded-lg border border-slate-800">
+          <span class="text-slate-400 font-mono text-[11px]">Threshold:</span>
+          <input type="range" id="confSlider" min="20" max="85" value="45" class="w-24 accent-amber-500 cursor-pointer" aria-label="Confidence threshold">
+          <span id="confSliderVal" class="font-mono text-amber-400 font-bold w-9 text-right">45%</span>
+        </label>
+      </div>
+
+      <!-- Main Interactive Viewport Area -->
+      <div id="viewportContainer" class="relative glass-card rounded-2xl border border-slate-800/80 overflow-hidden flex items-center justify-center h-[clamp(340px,72vw,740px)] lg:h-[clamp(440px,64vh,740px)] bg-slate-950/70 shadow-2xl">
+
+        <!-- Empty / Upload Prompt State -->
+        <div id="dropZone" class="flex flex-col items-center justify-center p-10 text-center cursor-pointer transition border-2 border-dashed border-slate-700/80 hover:border-amber-500/60 rounded-xl m-6 w-full max-w-xl bg-slate-900/40" role="button" tabindex="0" aria-label="Upload a thermal image">
+          <input type="file" id="fileInput" accept="image/*,.tif,.tiff" class="hidden">
+          <div class="w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center mb-4 text-amber-400">
+            <i data-lucide="upload-cloud" class="w-8 h-8"></i>
+          </div>
+          <h2 class="font-display font-semibold text-lg text-white mb-1">Upload Solar Thermal Flight Image</h2>
+          <p class="text-sm text-slate-400 max-w-sm mb-5">Drag and drop infrared drone imagery (JPEG / PNG / 16-bit radiometric TIFF) or click to browse</p>
+          <div class="flex items-center space-x-3">
+            <button type="button" id="btnBrowse" class="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs tracking-wide transition shadow-lg shadow-amber-500/20">Browse Files</button>
+            <button type="button" id="btnDropSample" class="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs transition border border-slate-700">Try Sample</button>
+          </div>
+          <p class="mt-6 text-[11px] font-mono text-slate-500">Shortcuts: <kbd>1</kbd>–<kbd>6</kbd> layers · <kbd>←</kbd><kbd>→</kbd> defects · <kbd>T</kbd> tour · <kbd>F</kbd> focus · <kbd>Esc</kbd> reset</p>
+        </div>
+
+        <!-- Spinner Loading State -->
+        <div id="loadingOverlay" class="hidden absolute inset-0 z-50 bg-slate-950/85 backdrop-blur-sm flex flex-col items-center justify-center" role="status" aria-live="polite">
+          <div class="relative w-20 h-20">
+            <div class="absolute inset-0 rounded-full border-4 border-amber-500/20"></div>
+            <div class="absolute inset-0 rounded-full border-4 border-amber-500 border-t-transparent animate-spin"></div>
+            <div class="absolute inset-0 flex items-center justify-center">
+              <i data-lucide="scan" class="w-8 h-8 text-amber-400 animate-pulse"></i>
+            </div>
+          </div>
+          <p class="font-display font-semibold text-white mt-5 text-base">Analyzing Thermal Gradients…</p>
+          <p id="loadingStage" class="text-xs font-mono text-amber-400/80 mt-1">YOLOv9 Inference &amp; IEC Severity Diagnostic</p>
+        </div>
+
+        <!-- Interactive Image Stage (Hidden until loaded) -->
+        <div id="stageWrapper" class="hidden absolute inset-0 flex items-center justify-center select-none p-3">
+          <div id="imageStage" class="relative rounded-lg overflow-hidden border border-slate-800 shadow-2xl bg-black">
+            <div id="zoomLayer" class="absolute inset-0">
+              <img id="mainDisplayImg" src="" alt="Thermal inspection frame" class="block w-full h-full" draggable="false">
+              <img data-layer-img="ironbow" class="layer-img" alt="" draggable="false">
+              <img data-layer-img="sobel" class="layer-img" alt="" draggable="false">
+              <img data-layer-img="otsu" class="layer-img" alt="" draggable="false">
+              <img data-layer-img="contours" class="layer-img" alt="" draggable="false">
+              <div id="boxLayer" class="absolute inset-0 opacity-0 pointer-events-none"></div>
+
+              <!-- Active Target Reticle Overlay -->
+              <div id="activeReticle" class="hidden absolute pointer-events-none border-dashed border-amber-400 rounded shadow-[0_0_20px_rgba(245,158,11,0.5)]">
+                <span class="corner -top-2 -left-2 border-t-2 border-l-2"></span>
+                <span class="corner -top-2 -right-2 border-t-2 border-r-2"></span>
+                <span class="corner -bottom-2 -left-2 border-b-2 border-l-2"></span>
+                <span class="corner -bottom-2 -right-2 border-b-2 border-r-2"></span>
+              </div>
+
+              <!-- Dynamic Pin Overlay Layer -->
+              <div id="pinOverlayLayer" class="absolute inset-0"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Layer caption (formula / description) -->
+        <div id="layerCaption" class="hidden absolute top-3 left-3 z-30 max-w-[70%] bg-slate-950/85 backdrop-blur px-3 py-2 rounded-lg border border-slate-800 pointer-events-none transition-opacity duration-500">
+          <div id="layerCaptionTitle" class="text-[11px] font-mono font-semibold text-amber-400"></div>
+          <div id="layerCaptionText" class="text-[11px] text-slate-300 leading-snug mt-0.5"></div>
+        </div>
+
+        <!-- View controls -->
+        <div id="viewControls" class="hidden absolute top-3 right-3 z-30 flex flex-col gap-1.5">
+          <button type="button" id="btnFocus" class="w-8 h-8 rounded-lg bg-slate-900/90 border border-slate-700 text-slate-300 hover:text-amber-400 flex items-center justify-center" aria-pressed="false" aria-label="Focus zoom on selected defect (F)" title="Focus zoom on selected defect (F)"><i data-lucide="crosshair" class="w-4 h-4"></i></button>
+          <button type="button" id="btnZoomIn" class="w-8 h-8 rounded-lg bg-slate-900/90 border border-slate-700 text-slate-300 hover:text-white flex items-center justify-center" aria-label="Zoom in" title="Zoom in (scroll wheel)"><i data-lucide="zoom-in" class="w-4 h-4"></i></button>
+          <button type="button" id="btnZoomOut" class="w-8 h-8 rounded-lg bg-slate-900/90 border border-slate-700 text-slate-300 hover:text-white flex items-center justify-center" aria-label="Zoom out" title="Zoom out"><i data-lucide="zoom-out" class="w-4 h-4"></i></button>
+          <button type="button" id="btnResetView" class="w-8 h-8 rounded-lg bg-slate-900/90 border border-slate-700 text-slate-300 hover:text-white flex items-center justify-center" aria-label="Reset view (Esc)" title="Reset view (Esc / double-click)"><i data-lucide="maximize" class="w-4 h-4"></i></button>
+        </div>
+
+        <!-- Presenter Mode HUD -->
+        <div id="tourHud" class="hidden absolute left-3 right-3 bottom-11 z-40 glass-card rounded-xl border border-sky-400/30 shadow-2xl px-4 pt-3 pb-2.5" role="region" aria-label="Guided presentation tour" aria-live="polite">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-2">
+                <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold tracking-wider bg-sky-500/15 text-sky-300 border border-sky-400/40">PRESENTER MODE</span>
+                <span id="tourStepCounter" class="text-[11px] font-mono text-slate-400">Step 1 / 1</span>
+                <span id="tourRemaining" class="text-[11px] font-mono text-amber-400 tabular-nums">3.5 s</span>
+              </div>
+              <div id="tourTitle" class="font-display font-semibold text-sm text-white mt-1 truncate">—</div>
+              <div id="tourCaption" class="text-[11px] text-slate-300 leading-snug mt-0.5 line-clamp-2">—</div>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <button type="button" id="tourPrev" class="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 flex items-center justify-center" aria-label="Previous step"><i data-lucide="skip-back" class="w-4 h-4"></i></button>
+              <button type="button" id="tourPause" class="h-8 px-3 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 border border-sky-400/40 flex items-center gap-1.5 text-xs font-semibold" aria-label="Pause tour">
+                <i data-lucide="pause" class="w-4 h-4"></i><span>Pause</span>
+              </button>
+              <button type="button" id="tourNext" class="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 flex items-center justify-center" aria-label="Next step"><i data-lucide="skip-forward" class="w-4 h-4"></i></button>
+              <select id="tourSpeed" class="h-8 rounded-lg bg-slate-900 border border-slate-700 text-[11px] font-mono text-slate-300 px-1.5" aria-label="Seconds per defect">
+                <option value="2500">2.5 s</option>
+                <option value="3500" selected>3.5 s</option>
+                <option value="5000">5.0 s</option>
+                <option value="7000">7.0 s</option>
+              </select>
+              <button type="button" id="tourExit" class="h-8 px-3 rounded-lg bg-red-500/15 hover:bg-red-500/25 text-red-300 border border-red-500/40 text-xs font-semibold" aria-label="Exit tour">Exit</button>
+            </div>
+          </div>
+          <div class="mt-2.5 h-1.5 rounded-full bg-slate-800 overflow-hidden">
+            <div id="tourProgressBar" class="h-full w-full rounded-full bg-gradient-to-r from-sky-400 to-amber-400"></div>
+          </div>
+          <div id="tourDots" class="mt-1.5 flex gap-1" aria-hidden="true"></div>
+        </div>
+
+        <!-- Canvas Footer Badges -->
+        <div id="canvasFooter" class="hidden absolute bottom-3 left-3 right-3 flex items-center justify-between gap-2 text-[11px] font-mono text-slate-400 pointer-events-none">
+          <div class="bg-slate-900/90 px-3 py-1 rounded-lg border border-slate-800/80 backdrop-blur flex items-center space-x-2 min-w-0">
+            <i data-lucide="crosshair" class="w-3.5 h-3.5 text-amber-400 flex-none"></i>
+            <span class="truncate">Click a pin to inspect · scroll to zoom · drag to pan · double-click to reset</span>
+          </div>
+          <div class="bg-slate-900/90 px-3 py-1 rounded-lg border border-slate-800/80 backdrop-blur whitespace-nowrap">
+            <span id="canvasResolutionTag">640 × 512 Thermal</span> · <span id="zoomTag">1.0×</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick Defect Chips Strip -->
+      <div id="defectChipsContainer" class="hidden glass-card rounded-xl p-2.5 border border-slate-800 flex items-center gap-2">
+        <span class="text-[11px] font-mono uppercase text-slate-400 whitespace-nowrap pl-1">Quick Jump:</span>
+        <div id="defectChipsList" class="flex-1 flex items-center gap-2 overflow-x-auto py-0.5"></div>
+        <div class="flex items-center gap-1.5 pl-2 border-l border-slate-800">
+          <button type="button" id="btnExportCsv" class="px-2.5 py-1 rounded-md text-[11px] font-mono bg-slate-900 text-slate-300 border border-slate-700 hover:text-white flex items-center gap-1" title="Download defect register as CSV"><i data-lucide="sheet" class="w-3.5 h-3.5"></i>CSV</button>
+          <button type="button" id="btnExportJson" class="px-2.5 py-1 rounded-md text-[11px] font-mono bg-slate-900 text-slate-300 border border-slate-700 hover:text-white flex items-center gap-1" title="Download inspection data as JSON"><i data-lucide="braces" class="w-3.5 h-3.5"></i>JSON</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Side: Telemetry & Region Inspector Drawer -->
+    <aside class="lg:col-span-4 flex flex-col min-w-0">
+      <div id="inspectorCard" class="glass-card rounded-2xl border border-slate-800 p-5 flex flex-col justify-between h-full min-h-[560px] shadow-2xl relative">
+        <div>
+          <div class="flex items-center justify-between border-b border-slate-800 pb-4">
+            <div class="flex items-center space-x-2.5">
+              <div class="w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                <i data-lucide="scan-line" class="w-4 h-4"></i>
+              </div>
+              <div>
+                <h3 class="font-display font-bold text-sm tracking-wide text-white uppercase">Region Defect Telemetry</h3>
+                <p class="text-[11px] text-slate-400 font-mono">IEC 62446-3 Fault Diagnostics</p>
+              </div>
+            </div>
+            <span id="selectedDefectCode" class="text-xs font-mono font-bold px-2.5 py-1 rounded bg-slate-800 border border-slate-700 text-amber-400">#STANDBY</span>
+          </div>
+
+          <!-- Empty State -->
+          <div id="inspectorStandby" class="py-16 flex flex-col items-center justify-center text-center">
+            <div class="w-16 h-16 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center mb-4 text-slate-500">
+              <i data-lucide="mouse-pointer-click" class="w-8 h-8"></i>
+            </div>
+            <h4 class="font-display font-medium text-slate-300 text-base mb-1">No Region Selected</h4>
+            <p id="standbyText" class="text-xs text-slate-500 max-w-xs">Load the sample flight or upload a thermal frame, then click any glowing defect pin to reveal macro-crop diagnostics and root causes.</p>
+          </div>
+
+          <!-- Active Defect Content -->
+          <div id="inspectorActive" class="hidden mt-4 space-y-3.5">
+            <div class="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <span id="detailFaultName" class="font-display font-bold text-base text-white block">—</span>
+                <div class="flex flex-wrap items-center gap-1.5 mt-1.5">
+                  <span id="detailIecBadge" class="inline-block px-2 py-0.5 rounded text-[11px] font-mono font-semibold border">—</span>
+                  <span id="detailPriority" class="inline-block px-2 py-0.5 rounded text-[11px] font-mono text-slate-300 bg-slate-800 border border-slate-700">—</span>
+                </div>
+              </div>
+              <div class="text-right flex-none">
+                <span class="text-[10px] font-mono uppercase text-slate-400 block">Confidence</span>
+                <span id="detailConfidence" class="font-mono text-base font-bold text-emerald-400">—</span>
+                <div class="mt-1 w-20 h-1.5 rounded-full bg-slate-800 overflow-hidden ml-auto"><div id="detailConfBar" class="h-full bg-emerald-400 rounded-full" style="width:0%"></div></div>
+              </div>
+            </div>
+
+            <!-- Zoomed Macro Crop -->
+            <div class="relative rounded-xl overflow-hidden border border-slate-800 bg-slate-950">
+              <div class="absolute top-2 left-2 z-10 flex flex-wrap gap-1" role="group" aria-label="Crop layer">
+                <button type="button" data-crop="thermal" aria-pressed="true" class="crop-btn px-2 py-0.5 rounded text-[10px] font-mono bg-slate-900/90 text-slate-400 border border-slate-700 hover:text-white">Thermal</button>
+                <button type="button" data-crop="ironbow" aria-pressed="false" class="crop-btn px-2 py-0.5 rounded text-[10px] font-mono bg-slate-900/90 text-slate-400 border border-slate-700 hover:text-white">Ironbow</button>
+                <button type="button" data-crop="sobel" aria-pressed="false" class="crop-btn px-2 py-0.5 rounded text-[10px] font-mono bg-slate-900/90 text-slate-400 border border-slate-700 hover:text-white">Sobel</button>
+                <button type="button" data-crop="otsu" aria-pressed="false" class="crop-btn px-2 py-0.5 rounded text-[10px] font-mono bg-slate-900/90 text-slate-400 border border-slate-700 hover:text-white">Otsu</button>
+              </div>
+              <img id="detailCropImg" src="" alt="Zoomed defect region" class="w-full h-44 object-contain bg-black [image-rendering:pixelated]">
+              <div id="detailCropTag" class="absolute bottom-2 right-2 px-2 py-0.5 rounded bg-slate-950/80 backdrop-blur text-[10px] font-mono text-slate-400 border border-slate-800">Macro Zoomed ROI</div>
+            </div>
+
+            <!-- Quantitative Telemetry Grid -->
+            <div class="grid grid-cols-2 gap-2.5 text-xs font-mono">
+              <div class="p-3 rounded-xl bg-slate-900/70 border border-slate-800">
+                <span class="text-[10px] uppercase text-slate-400 block">Est. Thermal Delta (ΔT)</span>
+                <span id="detailDeltaT" class="text-base font-bold text-amber-400 mt-0.5 block">—</span>
+                <span id="detailDeltaRange" class="text-[10px] text-slate-500">Class-conditional estimate</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900/70 border border-slate-800">
+                <span class="text-[10px] uppercase text-slate-400 block">Power Loss Rate</span>
+                <span id="detailPowerLoss" class="text-base font-bold text-red-400 mt-0.5 block">—</span>
+                <span id="detailPowerLossPct" class="text-[10px] text-slate-500">—</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900/70 border border-slate-800">
+                <span class="text-[10px] uppercase text-slate-400 block">Image Thermal Contrast</span>
+                <span id="detailContrast" class="text-base font-bold text-sky-300 mt-0.5 block">—</span>
+                <span id="detailContrastSub" class="text-[10px] text-slate-500">—</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-900/70 border border-slate-800">
+                <span class="text-[10px] uppercase text-slate-400 block">Location (px)</span>
+                <span id="detailLocation" class="text-base font-bold text-slate-200 mt-0.5 block">—</span>
+                <span id="detailSize" class="text-[10px] text-slate-500">—</span>
+              </div>
+            </div>
+
+            <div class="p-3.5 rounded-xl bg-slate-900/70 border border-slate-800 text-xs">
+              <div class="flex items-center space-x-2 text-slate-300 font-semibold mb-1">
+                <i data-lucide="cpu" class="w-3.5 h-3.5 text-amber-400"></i>
+                <span>Engineering Diagnostic</span>
+              </div>
+              <p id="detailDescription" class="text-slate-400 text-[11px] leading-relaxed">—</p>
+            </div>
+
+            <div class="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs">
+              <div class="flex items-center space-x-2 text-amber-400 font-semibold mb-1">
+                <i data-lucide="wrench" class="w-3.5 h-3.5"></i>
+                <span>Field Maintenance Action</span>
+              </div>
+              <p id="detailAction" class="text-slate-300 text-[11px] leading-relaxed">—</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Inspector Navigation Controls -->
+        <div id="inspectorFooter" class="hidden pt-4 mt-4 border-t border-slate-800 flex items-center justify-between text-xs">
+          <div class="flex items-center space-x-2">
+            <button type="button" id="btnPrevDefect" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono flex items-center space-x-1" aria-label="Previous defect">
+              <i data-lucide="chevron-left" class="w-3.5 h-3.5"></i><span>Prev</span>
+            </button>
+            <button type="button" id="btnNextDefect" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono flex items-center space-x-1" aria-label="Next defect">
+              <span>Next</span><i data-lucide="chevron-right" class="w-3.5 h-3.5"></i>
+            </button>
+            <button type="button" id="btnZoomDefect" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 font-mono flex items-center space-x-1" aria-label="Zoom to this defect">
+              <i data-lucide="scan-search" class="w-3.5 h-3.5"></i><span>Zoom</span>
+            </button>
+          </div>
+          <span id="defectPositionCounter" class="text-xs font-mono text-slate-400">—</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ── IPCV Analysis Lab ──────────────────────────────────────────── -->
+    <section id="ipcvLab" class="lg:col-span-12 grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-4 gap-4" aria-label="IPCV analysis lab">
+
+      <!-- Histogram + Otsu -->
+      <div class="glass-card rounded-2xl border border-slate-800 p-4 flex flex-col">
+        <div class="flex items-center justify-between">
+          <h3 class="font-display font-semibold text-sm text-white flex items-center gap-2"><i data-lucide="bar-chart-3" class="w-4 h-4 text-amber-400"></i>Intensity Histogram &amp; Otsu t*</h3>
+          <span id="otsuBadge" class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">t* = —</span>
+        </div>
+        <p class="text-[11px] text-slate-400 mt-1">Otsu maximises between-class variance σ²<sub>B</sub>(t) = [μ<sub>T</sub>ω(t) − μ(t)]² / ω(t)(1 − ω(t)).</p>
+        <div class="relative mt-3">
+          <canvas id="histCanvas" class="w-full h-[140px] block" aria-label="Grayscale intensity histogram with Otsu threshold" role="img"></canvas>
+          <div id="histTooltip" class="hidden absolute top-0 px-2 py-1 rounded bg-slate-950/95 border border-slate-700 text-[10px] font-mono text-slate-200 whitespace-nowrap"></div>
+        </div>
+        <div class="flex items-center gap-3 mt-2 text-[10px] font-mono text-slate-400">
+          <span class="flex items-center gap-1"><i class="inline-block w-2.5 h-2.5 rounded-sm" style="background:#64748b"></i>≤ t* background</span>
+          <span class="flex items-center gap-1"><i class="inline-block w-2.5 h-2.5 rounded-sm" style="background:#f59e0b"></i>&gt; t* module / hot</span>
+        </div>
+        <dl id="ipcvStats" class="grid grid-cols-2 gap-x-3 gap-y-1.5 mt-3 text-[11px] font-mono">
+          <div class="flex justify-between"><dt class="text-slate-500">Separability η</dt><dd id="statEta" class="text-slate-200">—</dd></div>
+          <div class="flex justify-between"><dt class="text-slate-500">Hot fraction</dt><dd id="statHot" class="text-slate-200">—</dd></div>
+          <div class="flex justify-between"><dt class="text-slate-500">Entropy</dt><dd id="statEntropy" class="text-slate-200">—</dd></div>
+          <div class="flex justify-between"><dt class="text-slate-500">RMS contrast</dt><dd id="statContrast" class="text-slate-200">—</dd></div>
+          <div class="flex justify-between"><dt class="text-slate-500">Mean |∇I|</dt><dd id="statSobel" class="text-slate-200">—</dd></div>
+          <div class="flex justify-between"><dt class="text-slate-500">Edge density</dt><dd id="statEdge" class="text-slate-200">—</dd></div>
+        </dl>
+        <p id="otsuVerify" class="text-[10px] font-mono text-slate-500 mt-2">—</p>
+      </div>
+
+      <!-- Homography -->
+      <div class="glass-card rounded-2xl border border-slate-800 p-4 flex flex-col">
+        <div class="flex items-center justify-between">
+          <h3 class="font-display font-semibold text-sm text-white flex items-center gap-2"><i data-lucide="scan" class="w-4 h-4 text-amber-400"></i>Homography Rectification</h3>
+          <span id="geoBadge" class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">— tables</span>
+        </div>
+        <p class="text-[11px] text-slate-400 mt-1">findContours → approxPolyDP + LSQ edge fit → getPerspectiveTransform → warpPerspective.</p>
+        <div class="grid grid-cols-2 gap-2 mt-3">
+          <button type="button" id="geoOverlayBtn" class="relative rounded-lg overflow-hidden border border-slate-800 bg-black aspect-[5/4] group" title="Show contours layer in the viewport">
+            <img id="geoOverlayImg" alt="Detected module table contours" class="w-full h-full object-cover">
+            <span class="absolute bottom-1 left-1 text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-950/85 text-slate-300">contours</span>
+          </button>
+          <div class="relative rounded-lg overflow-hidden border border-slate-800 bg-black aspect-[5/4] flex items-center">
+            <img id="geoRectImg" alt="Rectified top-down module table" class="w-full object-contain">
+            <span class="absolute bottom-1 left-1 text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-950/85 text-slate-300">rectified (aspect-true)</span>
+          </div>
+        </div>
+        <div class="mt-3">
+          <div class="text-[10px] font-mono uppercase text-slate-500 mb-1">H (target → 640×640)</div>
+          <pre id="geoMatrix" class="text-[10.5px] font-mono text-slate-200 bg-slate-950/70 border border-slate-800 rounded-lg px-2.5 py-2 overflow-x-auto leading-snug">—</pre>
+        </div>
+        <dl class="grid grid-cols-2 gap-x-3 gap-y-1.5 mt-2 text-[11px] font-mono">
+          <div class="flex justify-between"><dt class="text-slate-500">cond(Ĥ)</dt><dd id="geoCond" class="text-slate-200">—</dd></div>
+          <div class="flex justify-between"><dt class="text-slate-500">Rectangularity</dt><dd id="geoRect" class="text-slate-200">—</dd></div>
+        </dl>
+        <p class="text-[10px] font-mono text-slate-500 mt-2">Validate on a synthetic oblique view: <span class="text-slate-300">python ipcv_geometry.py</span></p>
+      </div>
+
+      <!-- Pipeline telemetry -->
+      <div class="glass-card rounded-2xl border border-slate-800 p-4 flex flex-col">
+        <div class="flex items-center justify-between">
+          <h3 class="font-display font-semibold text-sm text-white flex items-center gap-2"><i data-lucide="gauge" class="w-4 h-4 text-amber-400"></i>Pipeline Telemetry</h3>
+          <span id="telemetryTotal" class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">— ms</span>
+        </div>
+        <p class="text-[11px] text-slate-400 mt-1">Server-side wall-clock per stage for this frame.</p>
+        <div id="telemetryBars" class="mt-3 space-y-2"></div>
+        <dl class="grid grid-cols-1 gap-y-1.5 mt-3 text-[11px] font-mono">
+          <div class="flex justify-between gap-2"><dt class="text-slate-500">Device</dt><dd id="telDevice" class="text-slate-200 truncate">—</dd></div>
+          <div class="flex justify-between gap-2"><dt class="text-slate-500">NMS</dt><dd id="telNms" class="text-slate-200">—</dd></div>
+          <div class="flex justify-between gap-2"><dt class="text-slate-500">Frame</dt><dd id="telFrame" class="text-slate-200">—</dd></div>
+        </dl>
+        <button type="button" id="btnBenchmark" class="mt-auto pt-3 self-start text-[11px] font-mono text-sky-300 hover:text-sky-200 flex items-center gap-1.5">
+          <i data-lucide="trophy" class="w-3.5 h-3.5"></i>View benchmark card (evaluate_benchmark.py)
+        </button>
+      </div>
+
+      <!-- Economic model -->
+      <div class="glass-card rounded-2xl border border-slate-800 p-4 flex flex-col">
+        <div class="flex items-center justify-between">
+          <h3 class="font-display font-semibold text-sm text-white flex items-center gap-2"><i data-lucide="calculator" class="w-4 h-4 text-amber-400"></i>Yield-Loss Economics</h3>
+          <button type="button" id="econReset" class="text-[10px] font-mono text-slate-400 hover:text-white">reset</button>
+        </div>
+        <p class="text-[11px] text-slate-400 mt-1">What-if model: changes re-price every defect and the KPIs instantly.</p>
+        <form id="econForm" class="grid grid-cols-2 gap-2.5 mt-3" onsubmit="return false">
+          <label><span class="field-label">Module W<sub>p</sub></span><input class="field-input" type="number" id="econWatts" min="10" max="1000" step="5" value="400"></label>
+          <label><span class="field-label">Tariff $/kWh</span><input class="field-input" type="number" id="econTariff" min="0" max="5" step="0.01" value="0.12"></label>
+          <label><span class="field-label">Peak sun h/day</span><input class="field-input" type="number" id="econSun" min="0.5" max="12" step="0.1" value="4.5"></label>
+          <label><span class="field-label">Modules / string</span><input class="field-input" type="number" id="econString" min="1" max="60" step="1" value="20"></label>
+        </form>
+        <div class="mt-3 p-3 rounded-xl bg-slate-900/70 border border-slate-800 text-[11px] font-mono space-y-1">
+          <div class="flex justify-between"><span class="text-slate-500">P<sub>loss</sub> = Σ W<sub>p</sub>·loss%·n</span><span id="econPower" class="text-slate-200">—</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">E = P·PSH·365</span><span id="econEnergy" class="text-slate-200">—</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">$ = E·tariff</span><span id="econMoney" class="text-amber-300 font-bold">—</span></div>
+        </div>
+        <p class="text-[10px] text-slate-500 mt-2">String-level faults (open circuit, reversed polarity) take every module in the string offline.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="max-w-[1700px] w-full mx-auto px-4 sm:px-6 py-5 text-[11px] font-mono text-slate-500 flex flex-wrap items-center justify-between gap-2">
+    <span>HELIOS-AI · YOLOv9 Th_G_v9.pt · classical IPCV · IEC TS 62446-3:2017 aligned grading</span>
+    <span><kbd>1</kbd>–<kbd>6</kbd> layers · <kbd>←</kbd><kbd>→</kbd> defects · <kbd>T</kbd> tour · <kbd>Space</kbd> pause · <kbd>F</kbd> focus · <kbd>Esc</kbd> reset</span>
+  </footer>
+</div>
+
+<!-- Toasts -->
+<div id="toastHost" class="no-print fixed bottom-4 right-4 z-[60] flex flex-col gap-2 items-end" aria-live="polite"></div>
+
+<!-- Report details dialog -->
+<dialog id="reportDialog" aria-labelledby="reportDialogTitle" closedby="any">
+  <form method="dialog" id="reportForm" class="p-6">
+    <div class="flex items-center gap-3 mb-1">
+      <div class="w-9 h-9 rounded-lg bg-amber-500/15 border border-amber-500/40 flex items-center justify-center text-amber-400"><i data-lucide="file-badge" class="w-5 h-5"></i></div>
+      <div>
+        <h2 id="reportDialogTitle" class="font-display font-bold text-lg text-white">Solar Thermographic Inspection Certificate</h2>
+        <p class="text-xs text-slate-400">Audit details printed on the 2-page certificate and work order.</p>
+      </div>
+    </div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-5">
+      <label class="sm:col-span-2"><span class="field-label">Plant name</span><input class="field-input" name="plant" id="rptPlant" autofocus></label>
+      <label><span class="field-label">Site / block</span><input class="field-input" name="site" id="rptSite"></label>
+      <label><span class="field-label">Flight date</span><input class="field-input" type="date" name="date" id="rptDate"></label>
+      <label><span class="field-label">Inspector name</span><input class="field-input" name="inspector" id="rptInspector"></label>
+      <label><span class="field-label">Thermographer cert. no.</span><input class="field-input" name="cert" id="rptCert"></label>
+      <label class="sm:col-span-2"><span class="field-label">Camera payload</span><input class="field-input" name="payload" id="rptPayload"></label>
+    </div>
+    <p class="text-[11px] text-slate-500 mt-4">Tip: <kbd>Ctrl</kbd>+<kbd>P</kbd> prints the certificate directly with these saved details. Choose “Save as PDF” for a digital copy.</p>
+    <!-- Print comes first in DOM order so Enter in a field submits it (row-reverse keeps Cancel on the left). -->
+    <div class="flex flex-row-reverse justify-start gap-2 mt-5">
+      <button value="print" class="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-xs font-semibold text-slate-950 flex items-center gap-2"><i data-lucide="printer" class="w-4 h-4"></i>Generate &amp; Print</button>
+      <button value="cancel" formnovalidate class="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Benchmark dialog -->
+<dialog id="benchmarkDialog" class="wide" aria-labelledby="benchmarkTitle" closedby="any">
+  <div class="p-5">
+    <div class="flex items-center justify-between gap-3">
+      <h2 id="benchmarkTitle" class="font-display font-bold text-lg text-white">Model Benchmark &amp; Latency Card</h2>
+      <form method="dialog"><button class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200" autofocus>Close</button></form>
+    </div>
+    <div id="benchmarkSummary" class="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4 text-xs font-mono"></div>
+    <div id="benchmarkBody" class="mt-4 text-sm text-slate-400">Loading…</div>
+  </div>
+</dialog>
+
+<!-- ── Printable certificate (2 pages) ────────────────────────────────── -->
+<section id="printReport" class="print-only rpt" aria-hidden="true">
+  <div class="rpt-page" id="rptPage1">
+    <div class="rpt-head">
+      <div class="rpt-brand">
+        <div class="rpt-logo">H</div>
+        <div>
+          <div class="rpt-title">Solar Thermographic Inspection Certificate</div>
+          <div class="rpt-sub">HELIOS-AI Autonomous Aerial Thermography · Inspection Report &amp; Work Order</div>
+        </div>
+      </div>
+      <div class="rpt-meta-right">
+        Certificate No. <b data-r="certNo">—</b><br>
+        Issued <b data-r="issued">—</b>
+      </div>
+    </div>
+
+    <div class="rpt-compliance">
+      <div class="rpt-seal"><span>IEC TS</span><span>62446-3</span><span>2017</span></div>
+      <div>
+        <h3>Audited in accordance with IEC TS 62446-3:2017 standards</h3>
+        <p>Photovoltaic systems — Requirements for testing, documentation and maintenance — Part 3: Outdoor infrared thermography of photovoltaic modules and plants. Anomalies graded Class 1 (monitor) · Class 2 (scheduled repair) · Class 3 (critical / safety-relevant).</p>
+      </div>
+    </div>
+
+    <div class="rpt-grid">
+      <div><span>Plant name</span><b data-r="plant">—</b></div>
+      <div><span>Site / block</span><b data-r="site">—</b></div>
+      <div><span>Flight date</span><b data-r="date">—</b></div>
+      <div><span>Inspector</span><b data-r="inspector">—</b></div>
+      <div><span>Camera payload</span><b data-r="payload">—</b></div>
+      <div><span>AI engine</span><b data-r="engine">—</b></div>
+      <div><span>Source frame</span><b data-r="source">—</b></div>
+      <div><span>Detection threshold · NMS</span><b data-r="threshold">—</b></div>
+      <div><span>Economic basis</span><b data-r="econ">—</b></div>
+      <div><span>Thermographer cert. no.</span><b data-r="cert">—</b></div>
+    </div>
+
+    <div id="rptBody1">
+      <div class="rpt-h2">Executive Summary Scorecard</div>
+      <div class="rpt-score">
+        <div class="rpt-tile"><span>Array Health Score</span><b data-r="health">—</b><em data-r="healthStatus">—</em></div>
+        <div class="rpt-tile"><span>Total Detected Anomalies</span><b data-r="total">—</b><em data-r="breakdown">—</em></div>
+        <div class="rpt-tile"><span>Critical Risk Count</span><b data-r="critical" style="color:#b91c1c">—</b><em>IEC Class 3</em></div>
+        <div class="rpt-tile"><span>Dissipated Peak Watts</span><b data-r="watts">—</b><em data-r="kw">—</em></div>
+        <div class="rpt-tile"><span>Projected Annual Revenue Loss</span><b data-r="usd">—</b><em data-r="kwh">—</em></div>
+      </div>
+
+      <div class="rpt-figure">
+        <figure style="margin:0">
+          <img id="rptFigure" alt="Annotated thermal frame">
+          <figcaption data-r="figCaption">—</figcaption>
+        </figure>
+        <div>
+          <div class="rpt-h2" style="margin-top:0">Severity Distribution</div>
+          <div id="rptSeverity"></div>
+          <div class="rpt-h2">Primary Concern</div>
+          <div data-r="primary" style="font-size:9.5pt;font-weight:600">—</div>
+          <div class="rpt-note" data-r="recommendation">—</div>
+        </div>
+      </div>
+    </div>
+    <div class="rpt-foot"><span>HELIOS-AI · <span data-r="certNo">—</span></span><span>Page 1 of 2</span></div>
+  </div>
+
+  <div class="rpt-page" id="rptPage2">
+    <div class="rpt-head">
+      <div class="rpt-brand">
+        <div class="rpt-logo">H</div>
+        <div>
+          <div class="rpt-title">Defect Register &amp; Work Order</div>
+          <div class="rpt-sub"><span data-r="plant">—</span> · <span data-r="date">—</span></div>
+        </div>
+      </div>
+      <div class="rpt-meta-right">Certificate No. <b data-r="certNo">—</b></div>
+    </div>
+
+    <table class="rpt-table" style="margin-top:12px">
+      <colgroup>
+        <col style="width:3.5%"><col style="width:13%"><col style="width:21.5%"><col style="width:11%">
+        <col style="width:11%"><col style="width:9%"><col style="width:31%">
+      </colgroup>
+      <thead>
+        <tr><th>#</th><th>Defect Code</th><th>Classification</th><th>Severity Class · SLA</th><th>Est. ΔT</th><th>Power Loss</th><th>Action Plan</th></tr>
+      </thead>
+      <tbody id="rptTableBody"></tbody>
+    </table>
+
+    <div class="rpt-h2">Methodology &amp; Measurement Basis</div>
+    <div class="rpt-method" id="rptMethod"></div>
+
+    <div class="rpt-sign">
+      <div class="rpt-sign-box">
+        <h4>Certified Thermographer Signature</h4>
+        <div class="rpt-line"></div>
+        <div style="font-size:8pt;color:#4b5563">Name: <b data-r="inspector">—</b> · Cert. <span data-r="cert">—</span></div>
+        <div class="rpt-line" style="margin-top:14px"></div>
+        <div style="font-size:8pt;color:#4b5563">Date</div>
+      </div>
+      <div class="rpt-sign-box">
+        <h4 style="margin-bottom:10px">O&amp;M Operations Manager Stamp</h4>
+        <div class="rpt-stamp">OFFICIAL STAMP</div>
+        <div class="rpt-line" style="margin-top:10px"></div>
+        <div style="font-size:8pt;color:#4b5563">Work order accepted — name / date</div>
+      </div>
+    </div>
+    <div class="rpt-foot"><span>Generated by HELIOS-AI · <span data-r="issued">—</span></span><span>Page 2 of 2</span></div>
+  </div>
+</section>
+
+<!-- Application Logic -->
+<script>
+'use strict';
+
+// ─────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────
+const SEVERITY = {
+  'Class 3': { label: 'Critical', color: '#ef4444', penalty: 15.0, pulse: 'pulse-critical', priority: 'Immediate · ≤ 24 h' },
+  'Class 2': { label: 'Medium',   color: '#f59e0b', penalty: 6.0,  pulse: 'pulse-medium',   priority: 'Scheduled · ≤ 30 days' },
+  'Class 1': { label: 'Low',      color: '#3b82f6', penalty: 2.0,  pulse: 'pulse-minor',    priority: 'Monitor · next survey' },
+};
+const ECON_DEFAULTS = { module_watts: 400, tariff: 0.12, sun_hours: 4.5, modules_per_string: 20 };
+const REPORT_DEFAULTS = {
+  plant: 'Helios Alpha Solar Facility',
+  site: 'Block A · Inverter Group 03',
+  inspector: 'HELIOS-AI Autonomous Inspector',
+  cert: 'ITC Level II · TH-2026-0417',
+  payload: 'DJI Zenmuse H20T / Radiometric LWIR (640 × 512, 8–14 µm)',
+};
+const LAYERS = {
+  raw:      { key: 'raw_image_base64',       title: 'Raw thermal (8-bit grayscale)', text: 'Aspect-true LWIR frame as fed to YOLOv9 — brighter = warmer.' },
+  ironbow:  { key: 'ironbow_image_base64',   title: 'CLAHE + FLIR Ironbow', text: 'Contrast-limited adaptive histogram equalisation (clip 2.5, 8×8 tiles) mapped to the Inferno palette.' },
+  sobel:    { key: 'sobel_image_base64',     title: 'IPCV · Sobel |∇I| = √(Gx² + Gy²)', text: '3×3 Sobel gradient magnitude (Viridis): busbars, cell edges and sharp thermal transitions.' },
+  otsu:     { key: 'otsu_image_base64',      title: 'IPCV · Otsu binarisation', text: 'Gaussian 5×5 then global Otsu threshold t*: warm silicon (white) vs. cold background.' },
+  contours: { key: null,                     title: 'IPCV · Module contours & homography', text: 'Otsu mask → findContours → approxPolyDP + least-squares edges. Amber quad = rectification target.' },
+  bbox:     { key: 'raw_image_base64',       title: 'YOLOv9 detections', text: 'Class-agnostic NMS boxes, IEC colour coded (red Class 3 · amber Class 2 · blue Class 1).' },
+};
+const LAYER_ORDER = ['raw', 'ironbow', 'sobel', 'otsu', 'contours', 'bbox'];
+const LOADING_STAGES = ['Decoding frame & EXIF orientation…', 'CLAHE + FLIR Ironbow synthesis…', 'YOLOv9 forward pass…',
+  'Sobel gradients & Otsu threshold…', 'Contours & homography…', 'IEC TS 62446-3 grading…'];
+
+// ─────────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────────
+const state = {
+  analysisData: null,
+  activeLayer: 'raw',
+  activeFilter: 'all',
+  confThreshold: 0.45,
+  selectedDefectId: null,
+  cropMode: 'thermal',
+  focusMode: false,
+  econ: { ...ECON_DEFAULTS },
+  report: { ...REPORT_DEFAULTS },
+  view: { scale: 1, tx: 0, ty: 0 },
+  stageSize: { w: 0, h: 0 },
+  loading: false,
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// DOM helpers & utilities
+// ─────────────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+
+const dropZone = $('dropZone');
+const fileInput = $('fileInput');
+const loadingOverlay = $('loadingOverlay');
+const stageWrapper = $('stageWrapper');
+const imageStage = $('imageStage');
+const zoomLayer = $('zoomLayer');
+const mainDisplayImg = $('mainDisplayImg');
+const pinOverlayLayer = $('pinOverlayLayer');
+const boxLayer = $('boxLayer');
+const activeReticle = $('activeReticle');
+const canvasFooter = $('canvasFooter');
+const defectChipsContainer = $('defectChipsContainer');
+const defectChipsList = $('defectChipsList');
+const confSlider = $('confSlider');
+const viewportContainer = $('viewportContainer');
+
+const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const fmtInt = (v) => Math.round(v).toLocaleString('en-US');
+const fmtUsd = (v) => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmt1 = (v) => (Math.round(v * 10) / 10).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+function refreshIcons() {
+  if (window.lucide && typeof window.lucide.createIcons === 'function') window.lucide.createIcons();
+}
+
+function storageGet(key, fallback) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? { ...fallback, ...JSON.parse(raw) } : { ...fallback };
+  } catch (_) {
+    return { ...fallback };
+  }
+}
+function storageSet(key, value) {
+  try { window.localStorage.setItem(key, JSON.stringify(value)); } catch (_) { /* storage unavailable */ }
+}
+
+function toast(message, kind = 'info') {
+  const host = $('toastHost');
+  const el = document.createElement('div');
+  const tone = kind === 'error' ? 'border-red-500/50 text-red-200' : kind === 'success' ? 'border-emerald-500/50 text-emerald-200' : 'border-slate-600 text-slate-200';
+  el.className = `fade-up max-w-sm px-4 py-2.5 rounded-xl bg-slate-900/95 backdrop-blur border ${tone} text-xs shadow-2xl`;
+  el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  el.textContent = message;
+  host.appendChild(el);
+  setTimeout(() => { el.style.transition = 'opacity 300ms'; el.style.opacity = '0'; }, kind === 'error' ? 6000 : 3200);
+  setTimeout(() => el.remove(), kind === 'error' ? 6400 : 3600);
+}
+
+function download(filename, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Engine health
+// ─────────────────────────────────────────────────────────────────────────
+async function checkHealth() {
+  const dot = $('engineDot'), text = $('engineText');
+  try {
+    const res = await fetch('/api/v1/health', { cache: 'no-store' });
+    if (!res.ok) throw new Error(res.statusText);
+    const h = await res.json();
+    dot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+    const params = h.parameters ? ` · ${(h.parameters / 1e6).toFixed(1)}M params` : '';
+    text.textContent = `YOLOv9 online · ${h.cuda_active ? h.device : 'CPU'}${params}`;
+    state.health = h;
+  } catch (err) {
+    dot.className = 'w-2 h-2 rounded-full bg-red-500';
+    text.textContent = 'Inference engine offline';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Loading / data acquisition
+// ─────────────────────────────────────────────────────────────────────────
+let loadingTimer = null;
+function showLoading(show) {
+  state.loading = show;
+  loadingOverlay.classList.toggle('hidden', !show);
+  clearInterval(loadingTimer);
+  if (show) {
+    let i = 0;
+    $('loadingStage').textContent = LOADING_STAGES[0];
+    loadingTimer = setInterval(() => {
+      i = (i + 1) % LOADING_STAGES.length;
+      $('loadingStage').textContent = LOADING_STAGES[i];
+    }, 650);
+  }
+}
+
+function econQuery() {
+  const e = state.econ;
+  return { conf_threshold: state.confThreshold, module_watts: e.module_watts, tariff_usd: e.tariff,
+           sun_hours: e.sun_hours, modules_per_string: e.modules_per_string };
+}
+
+async function readError(res) {
+  try {
+    const body = await res.json();
+    return body.detail || body.error || res.statusText;
+  } catch (_) {
+    return res.statusText || `HTTP ${res.status}`;
+  }
+}
+
+async function loadSampleFlight() {
+  if (state.loading) return false;
+  endTour(false);
+  showLoading(true);
+  try {
+    const qs = new URLSearchParams(econQuery()).toString();
+    const res = await fetch(`/api/v1/sample?${qs}`);
+    if (!res.ok) throw new Error(await readError(res));
+    applyAnalysisData(await res.json());
+    return true;
+  } catch (err) {
+    toast('Error loading sample flight: ' + err.message, 'error');
+    return false;
+  } finally {
+    showLoading(false);
+  }
+}
+
+async function uploadFile(file) {
+  if (!file || state.loading) return;
+  if (file.size > 25 * 1024 * 1024) {
+    toast('File exceeds the 25 MB upload limit.', 'error');
+    return;
+  }
+  endTour(false);
+  showLoading(true);
+  const formData = new FormData();
+  formData.append('file', file);
+  Object.entries(econQuery()).forEach(([k, v]) => formData.append(k, v));
+  try {
+    const res = await fetch('/api/v1/inspect', { method: 'POST', body: formData });
+    if (!res.ok) throw new Error(await readError(res));
+    applyAnalysisData(await res.json());
+  } catch (err) {
+    toast('Upload error: ' + err.message, 'error');
+  } finally {
+    showLoading(false);
+    fileInput.value = '';
+  }
+}
+
+function applyAnalysisData(data) {
+  state.analysisData = data;
+  state.selectedDefectId = null;
+  dropZone.classList.add('hidden');
+  stageWrapper.classList.remove('hidden');
+  canvasFooter.classList.remove('hidden');
+  defectChipsContainer.classList.remove('hidden');
+  $('viewControls').classList.remove('hidden');
+  $('layerCaption').classList.remove('hidden');
+
+  // Image layers
+  mainDisplayImg.src = data.raw_image_base64;
+  $$('[data-layer-img]').forEach((img) => {
+    const layer = img.dataset.layerImg;
+    img.src = layer === 'contours' ? (data.geometry?.overlay_base64 || '') : (data[LAYERS[layer].key] || '');
+  });
+  const dims = data.image_dimensions;
+  $('canvasResolutionTag').textContent = `${dims.width} × ${dims.height} Thermal`;
+
+  fitStage();
+  resetView(false);
+  setLayer(state.activeLayer);
+  renderLab();
+  refreshAll();
+
+  // Select the most critical visible defect for immediate presentation impact.
+  const first = visibleDetections()[0];
+  if (first) selectDefect(first.id);
+  else clearSelection('No anomalies above the current threshold. Lower the threshold slider to review weaker candidates.');
+
+  const n = thresholdDetections().length;
+  toast(`Inspection complete · ${n} anomal${n === 1 ? 'y' : 'ies'} at ≥ ${Math.round(state.confThreshold * 100)}% confidence`, 'success');
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Detection sets, economics & KPIs
+// ─────────────────────────────────────────────────────────────────────────
+function thresholdDetections() {
+  if (!state.analysisData) return [];
+  return state.analysisData.detections.filter((d) => d.confidence_raw >= state.confThreshold);
+}
+function visibleDetections() {
+  return thresholdDetections().filter((d) => state.activeFilter === 'all' || d.iec_class === state.activeFilter);
+}
+function findDetection(id) {
+  return state.analysisData?.detections.find((d) => d.id === id) || null;
+}
+
+/** Power loss in W for one detection under the current economic model (mirrors enrich_detection). */
+function lossWatts(d) {
+  const n = d.loss_scope === 'string' ? state.econ.modules_per_string : 1;
+  return state.econ.module_watts * (d.power_loss_pct / 100) * n;
+}
+
+/** Client-side mirror of solar_iec_analyzer.calculate_site_kpis so the threshold & what-if inputs stay live. */
+function computeKpis(dets) {
+  const critical = dets.filter((d) => d.iec_class === 'Class 3').length;
+  const medium = dets.filter((d) => d.iec_class === 'Class 2').length;
+  const minor = dets.filter((d) => d.iec_class === 'Class 1').length;
+  const watts = dets.reduce((s, d) => s + lossWatts(d), 0);
+  const dailyKwh = (watts / 1000) * state.econ.sun_hours;
+  const annualKwh = dailyKwh * 365;
+  const usd = annualKwh * state.econ.tariff;
+  const penalty = dets.reduce((s, d) => s + (SEVERITY[d.iec_class]?.penalty ?? 2), 0);
+  const health = dets.length ? Math.max(20, Math.round((100 - penalty) * 10) / 10) : 100;
+  const status = health >= 90 ? 'Optimal' : health >= 70 ? 'Attention Required' : health >= 50 ? 'Action Needed' : 'Critical Intervention';
+  const counts = {};
+  dets.forEach((d) => { counts[d.class_name] = (counts[d.class_name] || 0) + 1; });
+  const primary = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || 'None';
+  return { total: dets.length, critical, medium, minor, watts, dailyKwh, annualKwh, usd, health, status, primary, counts };
+}
+
+function renderKpis() {
+  const k = computeKpis(thresholdDetections());
+  state.kpis = k;
+  $('kpiHealthScore').textContent = `${k.health}%`;
+  const hs = $('kpiHealthStatus');
+  hs.textContent = k.status;
+  hs.className = 'text-[11px] font-mono px-2 py-0.5 rounded border ' + (k.health >= 80
+    ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
+    : k.health >= 50 ? 'bg-amber-500/20 text-amber-400 border-amber-500/30' : 'bg-red-500/20 text-red-400 border-red-500/30');
+  $('kpiTotalDefects').textContent = k.total;
+  $('kpiDefectBreakdown').textContent = `${k.critical} Critical | ${k.medium} Med | ${k.minor} Low`;
+  $('kpiWattLoss').textContent = `${fmtInt(k.watts)} W`;
+  $('kpiWattSub').textContent = `Wp · ${(k.watts / 1000).toFixed(2)} kW`;
+  $('kpiFinancialLoss').textContent = fmtUsd(k.usd);
+  $('kpiFinancialSub').textContent = `USD/yr · ${fmtInt(k.annualKwh)} kWh`;
+
+  $('econPower').textContent = `${fmtInt(k.watts)} W`;
+  $('econEnergy').textContent = `${fmtInt(k.annualKwh)} kWh/yr`;
+  $('econMoney').textContent = `${fmtUsd(k.usd)}/yr`;
+}
+
+function updateCounts() {
+  const dets = thresholdDetections();
+  $('countAll').textContent = dets.length;
+  $('countC3').textContent = dets.filter((d) => d.iec_class === 'Class 3').length;
+  $('countC2').textContent = dets.filter((d) => d.iec_class === 'Class 2').length;
+  $('countC1').textContent = dets.filter((d) => d.iec_class === 'Class 1').length;
+}
+
+function refreshAll() {
+  if (!state.analysisData) return;
+  updateCounts();
+  renderKpis();
+  renderPins();
+  renderBoxes();
+  if (state.selectedDefectId && !visibleDetections().some((d) => d.id === state.selectedDefectId)) {
+    const next = visibleDetections()[0];
+    if (next) selectDefect(next.id);
+    else clearSelection('No anomalies match the current threshold / filter.');
+  } else if (state.selectedDefectId) {
+    updateInspector(findDetection(state.selectedDefectId));
+  }
+  scheduleReport();
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Layers
+// ─────────────────────────────────────────────────────────────────────────
+function setLayer(layer) {
+  if (!LAYERS[layer]) return;
+  if (layer === 'contours' && state.analysisData && !state.analysisData.geometry?.overlay_base64) {
+    toast('No module contours were found in this frame.', 'error');
+    return;
+  }
+  state.activeLayer = layer;
+  $$('.layer-btn').forEach((btn) => btn.setAttribute('aria-pressed', String(btn.dataset.layer === layer)));
+  $$('[data-layer-img]').forEach((img) => img.classList.toggle('visible', img.dataset.layerImg === layer));
+  boxLayer.style.opacity = layer === 'bbox' ? '1' : '0';
+  const meta = LAYERS[layer];
+  $('layerCaptionTitle').textContent = layer === 'otsu' && state.analysisData
+    ? `${meta.title} (t* = ${state.analysisData.ipcv?.otsu_threshold ?? '—'})` : meta.title;
+  $('layerCaptionText').textContent = meta.text;
+  showLayerCaption();
+}
+
+// The caption explains each layer, then fades so it never hides pins near the top-left.
+let captionTimer = null;
+function showLayerCaption() {
+  const cap = $('layerCaption');
+  clearTimeout(captionTimer);
+  if (!state.analysisData) return;
+  cap.classList.remove('hidden');
+  // In presenter mode the HUD already narrates each layer.
+  cap.style.opacity = tour.active ? '0' : '1';
+  captionTimer = setTimeout(() => { cap.style.opacity = '0'; }, 4500);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Stage fitting & zoom / pan
+// ─────────────────────────────────────────────────────────────────────────
+function fitStage() {
+  if (!state.analysisData) return;
+  const dims = state.analysisData.image_dimensions;
+  const aspect = dims.width / dims.height;
+  const availW = viewportContainer.clientWidth - 24;
+  const availH = viewportContainer.clientHeight - 24;
+  let w = availW, h = w / aspect;
+  if (h > availH) { h = availH; w = h * aspect; }
+  w = Math.max(80, Math.floor(w));
+  h = Math.max(64, Math.floor(h));
+  imageStage.style.width = `${w}px`;
+  imageStage.style.height = `${h}px`;
+  const changed = w !== state.stageSize.w || h !== state.stageSize.h;
+  state.stageSize = { w, h };
+  if (changed) applyView(false);
+}
+
+function clampView(v) {
+  const { w, h } = state.stageSize;
+  v.scale = clamp(v.scale, 1, 6);
+  v.tx = clamp(v.tx, w - v.scale * w, 0);
+  v.ty = clamp(v.ty, h - v.scale * h, 0);
+  return v;
+}
+
+function applyView(animate = true) {
+  clampView(state.view);
+  const { scale, tx, ty } = state.view;
+  zoomLayer.classList.toggle('no-anim', !animate);
+  zoomLayer.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+  zoomLayer.style.setProperty('--zoom', scale);
+  // Touch panning of the page stays possible until the user has zoomed in.
+  imageStage.style.touchAction = scale > 1 ? 'none' : 'pan-x pan-y';
+  imageStage.style.cursor = scale > 1 ? 'grab' : '';
+  $('zoomTag').textContent = `${scale.toFixed(1)}×`;
+}
+
+function resetView(animate = true) {
+  state.view = { scale: 1, tx: 0, ty: 0 };
+  applyView(animate);
+}
+
+function zoomAt(factor, cx, cy, animate = false) {
+  const v = state.view;
+  const next = clamp(v.scale * factor, 1, 6);
+  const k = next / v.scale;
+  v.tx = cx - k * (cx - v.tx);
+  v.ty = cy - k * (cy - v.ty);
+  v.scale = next;
+  applyView(animate);
+}
+
+function focusOnDetection(det, animate = true) {
+  if (!det) return;
+  const { w, h } = state.stageSize;
+  const p = det.pin_position;
+  const extent = Math.max(p.width_pct / 100, p.height_pct / 100, 0.02);
+  const scale = clamp(0.3 / extent, 1.8, 3.2);
+  const cx = (p.x_pct / 100) * w, cy = (p.y_pct / 100) * h;
+  state.view = { scale, tx: w / 2 - scale * cx, ty: h / 2 - scale * cy };
+  applyView(animate);
+}
+
+function setFocusMode(on) {
+  state.focusMode = on;
+  $('btnFocus').setAttribute('aria-pressed', String(on));
+  $('btnFocus').classList.toggle('text-amber-400', on);
+  $('btnFocus').classList.toggle('border-amber-500/60', on);
+  if (on && state.selectedDefectId) focusOnDetection(findDetection(state.selectedDefectId));
+  else if (!on) resetView();
+}
+
+// Wheel zoom anchored at the cursor; drag to pan when zoomed.
+imageStage.addEventListener('wheel', (e) => {
+  if (!state.analysisData) return;
+  // At 1× a downward scroll keeps scrolling the page instead of trapping it in the viewer.
+  if (e.deltaY > 0 && state.view.scale <= 1) return;
+  e.preventDefault();
+  const r = imageStage.getBoundingClientRect();
+  zoomAt(e.deltaY < 0 ? 1.18 : 1 / 1.18, e.clientX - r.left, e.clientY - r.top, false);
+}, { passive: false });
+
+const drag = { active: false, moved: false, x: 0, y: 0, tx: 0, ty: 0 };
+imageStage.addEventListener('pointerdown', (e) => {
+  if (state.view.scale <= 1 || e.button !== 0) return;
+  Object.assign(drag, { active: true, moved: false, x: e.clientX, y: e.clientY, tx: state.view.tx, ty: state.view.ty });
+});
+window.addEventListener('pointermove', (e) => {
+  if (!drag.active) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+  drag.moved = true;
+  imageStage.style.cursor = 'grabbing';
+  state.view.tx = drag.tx + dx;
+  state.view.ty = drag.ty + dy;
+  applyView(false);
+});
+window.addEventListener('pointerup', () => {
+  if (!drag.active) return;
+  drag.active = false;
+  imageStage.style.cursor = state.view.scale > 1 ? 'grab' : '';
+  // Swallow the click that ends a drag so pins are not selected by accident.
+  if (drag.moved) setTimeout(() => { drag.moved = false; }, 0);
+});
+imageStage.addEventListener('click', (e) => { if (drag.moved) { e.stopPropagation(); e.preventDefault(); } }, true);
+imageStage.addEventListener('dblclick', () => { setFocusMode(false); resetView(); });
+
+new ResizeObserver(() => fitStage()).observe(viewportContainer);
+
+// ─────────────────────────────────────────────────────────────────────────
+// Pins, detection boxes & chips
+// ─────────────────────────────────────────────────────────────────────────
+function renderPins() {
+  pinOverlayLayer.innerHTML = '';
+  defectChipsList.innerHTML = '';
+  const dets = visibleDetections();
+
+  dets.forEach((det) => {
+    const sev = SEVERITY[det.iec_class] || SEVERITY['Class 1'];
+    const pin = document.createElement('button');
+    pin.type = 'button';
+    pin.id = `pin-${det.id}`;
+    pin.className = 'defect-pin';
+    pin.style.left = `${det.pin_position.x_pct}%`;
+    pin.style.top = `${det.pin_position.y_pct}%`;
+    pin.setAttribute('aria-label', `${det.id} ${det.class_name}, ${det.iec_label}, ${det.confidence}% confidence`);
+    pin.innerHTML = `
+      <span class="relative flex items-center justify-center">
+        <span class="absolute w-8 h-8 rounded-full ${sev.pulse}" style="background-color:${det.badge_bg};border:1.5px solid ${det.color_hex}"></span>
+        <span class="pin-dot w-5 h-5 rounded-full flex items-center justify-center shadow-lg text-[9px] font-mono font-bold text-slate-950" style="background-color:${det.color_hex}">${det.index}</span>
+        <span class="pin-tip absolute bottom-full mb-3 whitespace-nowrap bg-slate-950/95 backdrop-blur px-2.5 py-1 rounded text-[11px] font-mono text-white border border-slate-700 shadow-xl pointer-events-none z-50">
+          <b class="text-amber-400">${escapeHtml(det.class_name)}</b> · ${det.confidence}%
+        </span>
+      </span>`;
+    pin.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (tour.active) pauseTour(true);
+      selectDefect(det.id);
+    });
+    pinOverlayLayer.appendChild(pin);
+
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.dataset.id = det.id;
+    chip.className = 'defect-chip flex-none px-2.5 py-1 rounded-lg text-xs font-mono font-medium border flex items-center gap-1.5 transition bg-slate-900 text-slate-400 border-slate-800 hover:text-white';
+    chip.innerHTML = `<span class="w-2 h-2 rounded-full" style="background-color:${det.color_hex}"></span><span>#${det.index} ${escapeHtml(det.class_name.split(' ').slice(0, 2).join(' '))}</span>`;
+    chip.addEventListener('click', () => {
+      if (tour.active) pauseTour(true);
+      selectDefect(det.id);
+    });
+    defectChipsList.appendChild(chip);
+  });
+
+  if (!dets.length) {
+    defectChipsList.innerHTML = '<span class="text-[11px] font-mono text-slate-500">No anomalies at this threshold / filter.</span>';
+  }
+  highlightActivePin(state.selectedDefectId);
+}
+
+function renderBoxes() {
+  boxLayer.innerHTML = '';
+  visibleDetections().forEach((det) => {
+    const p = det.pin_position;
+    const box = document.createElement('div');
+    box.className = 'det-box';
+    box.style.left = `${p.x_pct - p.width_pct / 2}%`;
+    box.style.top = `${p.y_pct - p.height_pct / 2}%`;
+    box.style.width = `${p.width_pct}%`;
+    box.style.height = `${p.height_pct}%`;
+    box.style.borderColor = det.color_hex;
+    box.innerHTML = `<span style="background:${det.color_hex}">#${det.index} ${escapeHtml(det.class_name.split(' ')[0])} ${Math.round(det.confidence)}%</span>`;
+    boxLayer.appendChild(box);
+  });
+}
+
+function highlightActivePin(defectId) {
+  $$('.defect-pin').forEach((p) => p.classList.toggle('active', p.id === `pin-${defectId}`));
+  $$('.defect-chip').forEach((c) => {
+    const on = c.dataset.id === defectId;
+    c.classList.toggle('bg-amber-500/20', on);
+    c.classList.toggle('text-amber-300', on);
+    c.classList.toggle('border-amber-400', on);
+    c.classList.toggle('bg-slate-900', !on);
+    c.classList.toggle('text-slate-400', !on);
+    c.classList.toggle('border-slate-800', !on);
+    // Scroll only the chip strip horizontally; scrollIntoView could jump the whole page mid-presentation.
+    if (on) defectChipsList.scrollTo({ left: c.offsetLeft - defectChipsList.offsetLeft - defectChipsList.clientWidth / 2 + c.clientWidth / 2, behavior: 'smooth' });
+  });
+
+  const det = defectId ? findDetection(defectId) : null;
+  if (!det) {
+    activeReticle.classList.add('hidden');
+    return;
+  }
+  const box = det.pin_position;
+  const pad = 0.8;
+  activeReticle.classList.remove('hidden');
+  activeReticle.style.left = `${box.x_pct - box.width_pct / 2 - pad}%`;
+  activeReticle.style.top = `${box.y_pct - box.height_pct / 2 - pad}%`;
+  activeReticle.style.width = `${box.width_pct + 2 * pad}%`;
+  activeReticle.style.height = `${box.height_pct + 2 * pad}%`;
+  activeReticle.style.borderColor = det.color_hex;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Selection & inspector drawer
+// ─────────────────────────────────────────────────────────────────────────
+function selectDefect(defectId, opts = {}) {
+  const det = findDetection(defectId);
+  if (!det) return;
+  state.selectedDefectId = defectId;
+  $('inspectorStandby').classList.add('hidden');
+  $('inspectorActive').classList.remove('hidden');
+  $('inspectorFooter').classList.remove('hidden');
+  updateInspector(det);
+  highlightActivePin(defectId);
+  if (opts.focus || state.focusMode) focusOnDetection(det);
+  if (opts.flash) {
+    const card = $('inspectorCard');
+    card.classList.remove('flash');
+    void card.offsetWidth;
+    card.classList.add('flash');
+    $('inspectorActive').classList.remove('fade-up');
+    void $('inspectorActive').offsetWidth;
+    $('inspectorActive').classList.add('fade-up');
+  }
+}
+
+function clearSelection(message) {
+  state.selectedDefectId = null;
+  $('inspectorStandby').classList.remove('hidden');
+  $('inspectorActive').classList.add('hidden');
+  $('inspectorFooter').classList.add('hidden');
+  $('selectedDefectCode').textContent = '#STANDBY';
+  if (message) $('standbyText').textContent = message;
+  highlightActivePin(null);
+}
+
+function updateInspector(det) {
+  if (!det) return;
+  const sev = SEVERITY[det.iec_class] || SEVERITY['Class 1'];
+  $('selectedDefectCode').textContent = `#${det.id}`;
+  $('detailFaultName').textContent = det.class_name;
+  const badge = $('detailIecBadge');
+  badge.textContent = det.iec_label;
+  badge.style.color = det.color_hex;
+  badge.style.backgroundColor = det.badge_bg;
+  badge.style.borderColor = det.badge_border;
+  $('detailPriority').textContent = sev.priority;
+
+  $('detailConfidence').textContent = `${det.confidence}%`;
+  $('detailConfBar').style.width = `${det.confidence}%`;
+  $('detailDeltaT').textContent = `+${det.delta_t_celsius} °C`;
+  $('detailDeltaRange').textContent = `Class prior ${det.delta_t_range?.[0] ?? '—'}–${det.delta_t_range?.[1] ?? '—'} °C`;
+
+  const watts = lossWatts(det);
+  $('detailPowerLoss').textContent = `−${fmt1(watts)} W`;
+  $('detailPowerLossPct').textContent = det.loss_scope === 'string'
+    ? `${det.power_loss_pct}% × ${state.econ.modules_per_string}-module string`
+    : `${det.power_loss_pct}% module derating`;
+
+  const sig = det.thermal_signature;
+  if (sig) {
+    $('detailContrast').textContent = `+${sig.contrast_dl} DL`;
+    $('detailContrastSub').textContent = `≈ +${sig.delta_t_image_celsius} °C @ ${sig.assumed_span_celsius} °C span · CNR ${sig.contrast_to_noise}`;
+  } else {
+    $('detailContrast').textContent = '—';
+    $('detailContrastSub').textContent = 'ROI too small to measure';
+  }
+  const b = det.bbox_pixels;
+  $('detailLocation').textContent = `${Math.round((b.x1 + b.x2) / 2)}, ${Math.round((b.y1 + b.y2) / 2)}`;
+  $('detailSize').textContent = `${b.x2 - b.x1} × ${b.y2 - b.y1} px box`;
+
+  $('detailDescription').textContent = det.description;
+  $('detailAction').textContent = det.field_action;
+
+  const list = visibleDetections();
+  const idx = list.findIndex((d) => d.id === det.id);
+  $('defectPositionCounter').textContent = idx >= 0 ? `${idx + 1} of ${list.length}` : `— of ${list.length}`;
+  updateCropDisplay();
+}
+
+function updateCropDisplay() {
+  const det = state.selectedDefectId ? findDetection(state.selectedDefectId) : null;
+  if (!det) return;
+  const map = { thermal: 'crop_base64', ironbow: 'ironbow_crop_base64', sobel: 'sobel_crop_base64', otsu: 'otsu_crop_base64' };
+  const src = det[map[state.cropMode]] || det.crop_base64 || state.analysisData.raw_image_base64;
+  $('detailCropImg').src = src;
+  $('detailCropTag').textContent = `Macro ROI · ${state.cropMode}`;
+}
+
+function navigateDefect(step) {
+  const list = visibleDetections();
+  if (!list.length) return;
+  let idx = list.findIndex((d) => d.id === state.selectedDefectId);
+  idx = idx < 0 ? 0 : (idx + step + list.length) % list.length;
+  selectDefect(list[idx].id);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Presenter Mode — automated guided tour
+// ─────────────────────────────────────────────────────────────────────────
+const tour = { active: false, paused: false, steps: [], i: 0, elapsed: 0, last: 0, raf: 0, dwell: 3500, restoreLayer: 'raw', restoreFocus: false };
+
+function buildTourSteps() {
+  const data = state.analysisData;
+  const k = computeKpis(thresholdDetections());
+  const tables = data.geometry?.modules_detected ?? 0;
+  const steps = [
+    { kind: 'overview', layer: 'raw', dur: 0.9, title: 'Flight overview',
+      caption: `${k.total} anomalies across ${tables} module tables · array health ${k.health}% (${k.status}).` },
+    { kind: 'layer', layer: 'ironbow', dur: 0.75, title: 'Layer 1 · CLAHE + FLIR Ironbow', caption: LAYERS.ironbow.text },
+    { kind: 'layer', layer: 'sobel', dur: 0.75, title: 'Layer 1 · Sobel gradient magnitude', caption: LAYERS.sobel.text },
+    { kind: 'layer', layer: 'otsu', dur: 0.75, title: `Layer 1 · Otsu threshold t* = ${data.ipcv?.otsu_threshold ?? '—'}`,
+      caption: `η = ${data.ipcv?.otsu_separability_eta ?? '—'} separability · NumPy re-derivation matches OpenCV.` },
+  ];
+  if (data.geometry?.overlay_base64) {
+    steps.push({ kind: 'layer', layer: 'contours', dur: 0.75, title: 'Layer 1 · Module contours & homography', caption: LAYERS.contours.text });
+  }
+  steps.push({ kind: 'layer', layer: 'bbox', dur: 0.75, title: 'Layer 2 · YOLOv9 detections', caption: LAYERS.bbox.text });
+  visibleDetections().forEach((d, i, arr) => {
+    steps.push({ kind: 'defect', id: d.id, layer: 'ironbow', dur: 1, title: `Defect ${i + 1} / ${arr.length} · ${d.id} · ${d.class_name}`,
+      caption: `${d.iec_label} · ΔT ≈ +${d.delta_t_celsius} °C · −${fmt1(lossWatts(d))} W → ${d.field_action}` });
+  });
+  steps.push({ kind: 'summary', layer: 'bbox', dur: 1, title: 'Inspection summary',
+    caption: `${k.critical} critical · ${fmtInt(k.watts)} W dissipated · ${fmtUsd(k.usd)}/yr at risk · print the audit certificate to issue work orders.` });
+  return steps;
+}
+
+async function startTour() {
+  if (tour.active) { endTour(false); return; }
+  if (!state.analysisData) {
+    const ok = await loadSampleFlight();
+    if (!ok) return;
+  }
+  tour.steps = buildTourSteps();
+  tour.active = true;
+  tour.paused = false;
+  tour.restoreLayer = state.activeLayer;
+  tour.restoreFocus = state.focusMode;
+  tour.dwell = parseInt($('tourSpeed').value, 10) || 3500;
+  $('tourHud').classList.remove('hidden');
+  $('tourHud').classList.add('fade-up');
+  $('btnTourLabel').textContent = '■ Stop Tour';
+  renderTourDots();
+  goToStep(0);
+  tour.last = 0;
+  cancelAnimationFrame(tour.raf);
+  tour.raf = requestAnimationFrame(tourTick);
+}
+
+function renderTourDots() {
+  $('tourDots').innerHTML = tour.steps.map((s, i) =>
+    `<span data-dot="${i}" class="h-1 flex-1 rounded-full ${s.kind === 'defect' ? 'bg-slate-600' : 'bg-slate-700'}"></span>`).join('');
+}
+
+function goToStep(i) {
+  tour.i = clamp(i, 0, tour.steps.length - 1);
+  tour.elapsed = 0;
+  const step = tour.steps[tour.i];
+  setLayer(step.layer);
+  if (step.kind === 'defect') {
+    selectDefect(step.id, { focus: true, flash: true });
+  } else {
+    resetView();
+  }
+  $('tourStepCounter').textContent = `Step ${tour.i + 1} / ${tour.steps.length}`;
+  $('tourTitle').textContent = step.title;
+  $('tourCaption').textContent = step.caption;
+  $$('#tourDots [data-dot]').forEach((dot, j) => {
+    dot.classList.toggle('bg-amber-400', j < tour.i);
+    dot.classList.toggle('bg-sky-400', j === tour.i);
+  });
+}
+
+function tourTick(ts) {
+  if (!tour.active) return;
+  if (!tour.last) tour.last = ts;
+  const dt = Math.min(120, ts - tour.last); // tab throttling must not skip steps
+  tour.last = ts;
+  if (!tour.paused) tour.elapsed += dt;
+  const total = tour.dwell * tour.steps[tour.i].dur;
+  const p = clamp(tour.elapsed / total, 0, 1);
+  $('tourProgressBar').style.transform = `scaleX(${p})`;
+  $('tourRemaining').textContent = tour.paused ? 'paused' : `${((total - tour.elapsed) / 1000).toFixed(1)} s`;
+  if (p >= 1) {
+    if (tour.i < tour.steps.length - 1) goToStep(tour.i + 1);
+    else { endTour(true); return; }
+  }
+  tour.raf = requestAnimationFrame(tourTick);
+}
+
+function setPauseButton(paused) {
+  const btn = $('tourPause');
+  btn.innerHTML = paused ? '<i data-lucide="play" class="w-4 h-4"></i><span>Resume</span>' : '<i data-lucide="pause" class="w-4 h-4"></i><span>Pause</span>';
+  btn.setAttribute('aria-label', paused ? 'Resume tour' : 'Pause tour');
+  refreshIcons();
+}
+
+function pauseTour(paused) {
+  if (!tour.active) return;
+  tour.paused = paused;
+  setPauseButton(paused);
+}
+
+function endTour(completed) {
+  if (!tour.active) return;
+  tour.active = false;
+  cancelAnimationFrame(tour.raf);
+  $('tourHud').classList.add('hidden');
+  $('btnTourLabel').textContent = '⚡ Guided Presentation Tour';
+  tour.paused = false;
+  setPauseButton(false);
+  setLayer(tour.restoreLayer);
+  state.focusMode = tour.restoreFocus;
+  resetView();
+  if (completed) toast('Guided tour complete — ready for questions.', 'success');
+}
+
+$('btnTour').addEventListener('click', startTour);
+$('tourPause').addEventListener('click', () => pauseTour(!tour.paused));
+$('tourExit').addEventListener('click', () => endTour(false));
+$('tourNext').addEventListener('click', () => { if (tour.i < tour.steps.length - 1) goToStep(tour.i + 1); else endTour(true); });
+$('tourPrev').addEventListener('click', () => goToStep(tour.i - 1));
+$('tourSpeed').addEventListener('change', (e) => { tour.dwell = parseInt(e.target.value, 10) || 3500; });
+
+// ─────────────────────────────────────────────────────────────────────────
+// IPCV lab cards
+// ─────────────────────────────────────────────────────────────────────────
+function renderLab() {
+  const data = state.analysisData;
+  if (!data) return;
+  const ip = data.ipcv || {};
+  $('otsuBadge').textContent = `t* = ${ip.otsu_threshold ?? '—'}`;
+  $('statEta').textContent = ip.otsu_separability_eta ?? '—';
+  $('statHot').textContent = ip.hot_pixel_fraction != null ? `${(ip.hot_pixel_fraction * 100).toFixed(1)}%` : '—';
+  $('statEntropy').textContent = ip.entropy_bits != null ? `${ip.entropy_bits} bits` : '—';
+  $('statContrast').textContent = ip.rms_contrast ?? '—';
+  $('statSobel').textContent = ip.sobel_mean_magnitude ?? '—';
+  $('statEdge').textContent = ip.edge_density != null ? `${(ip.edge_density * 100).toFixed(1)}%` : '—';
+  const match = ip.otsu_threshold === ip.otsu_threshold_numpy;
+  $('otsuVerify').textContent = `NumPy re-derivation t* = ${ip.otsu_threshold_numpy ?? '—'} ${match ? '✓ matches cv2.THRESH_OTSU' : '≠ OpenCV'}`;
+  $('otsuVerify').className = `text-[10px] font-mono mt-2 ${match ? 'text-emerald-400/80' : 'text-amber-400'}`;
+  drawHistogram();
+
+  const g = data.geometry || {};
+  $('geoBadge').textContent = `${g.modules_detected ?? 0} tables`;
+  $('geoOverlayImg').src = g.overlay_base64 || '';
+  $('geoRectImg').src = g.rectified_aspect_base64 || g.rectified_base64 || '';
+  $('geoMatrix').textContent = g.homography
+    ? g.homography.map((row) => row.map((v) => v.toFixed(Math.abs(v) < 0.01 ? 5 : 3).padStart(11)).join('')).join('\n')
+    : (g.error ? `unavailable: ${g.error}` : 'no module table found');
+  $('geoCond').textContent = g.diagnostics?.normalized_condition_number != null ? g.diagnostics.normalized_condition_number.toFixed(2) : '—';
+  $('geoRect').textContent = g.quads?.[0]?.rectangularity ?? '—';
+
+  const t = data.timing_ms || {};
+  const yolo = data.yolo_speed_ms || {};
+  const rows = [
+    ['Preprocess', t.preprocess], ['Forward pass', yolo.inference ?? t.inference_wall], ['NMS', yolo.postprocess],
+    ['IPCV layers', t.ipcv_layers], ['Geometry', t.geometry], ['IEC + crops', t.postprocess], ['Encoding', t.encoding],
+  ].filter(([, v]) => v != null);
+  const max = Math.max(...rows.map(([, v]) => v), 1);
+  $('telemetryBars').innerHTML = rows.map(([label, v]) => `
+    <div class="grid grid-cols-[92px_1fr_64px] items-center gap-2 text-[11px] font-mono">
+      <span class="text-slate-400 truncate">${label}</span>
+      <span class="h-2 rounded-full bg-slate-800 overflow-hidden"><span class="block h-full rounded-full" style="width:${Math.max(1.5, (v / max) * 100)}%;background:var(--series)"></span></span>
+      <span class="text-right text-slate-200 tabular-nums">${v.toFixed(1)} ms</span>
+    </div>`).join('');
+  $('telemetryTotal').textContent = t.total != null ? `${t.total.toFixed(0)} ms total` : '— ms';
+  $('telDevice').textContent = data.model_info?.device || '—';
+  $('telNms').textContent = data.analysis ? `${data.analysis.agnostic_nms ? 'class-agnostic' : 'per-class'} · IoU ${data.analysis.nms_iou}` : '—';
+  const od = data.original_dimensions, id = data.image_dimensions;
+  $('telFrame').textContent = od && (od.width !== id.width || od.height !== id.height)
+    ? `${od.width}×${od.height} → ${id.width}×${id.height}` : `${id.width}×${id.height} (aspect-true)`;
+}
+
+function drawHistogram(hoverBin = null) {
+  const data = state.analysisData;
+  const canvas = $('histCanvas');
+  const hist = data?.ipcv?.histogram;
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  if (!W || !H) return;
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  if (!hist) return;
+
+  const padB = 16, padT = 14;
+  const plotH = H - padB - padT;
+  const sorted = [...hist].sort((a, b) => a - b);
+  const cap = Math.max(1, sorted[Math.floor(sorted.length * 0.995)]);
+  const t = data.ipcv.otsu_threshold;
+  const bw = W / 256;
+
+  ctx.strokeStyle = '#334155';
+  ctx.lineWidth = 1;
+  [0.5, 1].forEach((f) => {
+    ctx.beginPath();
+    ctx.moveTo(0, padT + plotH * (1 - f) + 0.5);
+    ctx.lineTo(W, padT + plotH * (1 - f) + 0.5);
+    ctx.stroke();
+  });
+
+  for (let i = 0; i < 256; i++) {
+    const h = Math.min(1, hist[i] / cap) * plotH;
+    ctx.fillStyle = i === hoverBin ? '#f1f5f9' : (i <= t ? '#64748b' : '#f59e0b');
+    ctx.fillRect(i * bw, padT + plotH - h, Math.max(1, bw - 0.4), h);
+  }
+  ctx.fillStyle = '#475569';
+  ctx.fillRect(0, padT + plotH, W, 1);
+
+  const tx = (t + 0.5) * bw;
+  ctx.setLineDash([4, 3]);
+  ctx.strokeStyle = '#f1f5f9';
+  ctx.beginPath();
+  ctx.moveTo(tx, padT - 4);
+  ctx.lineTo(tx, padT + plotH);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.font = '600 10px "JetBrains Mono", monospace';
+  ctx.fillStyle = '#f1f5f9';
+  ctx.textAlign = tx > W - 60 ? 'right' : 'left';
+  ctx.fillText(`t* = ${t}`, tx + (tx > W - 60 ? -5 : 5), padT + 2);
+
+  ctx.font = '10px "JetBrains Mono", monospace';
+  ctx.fillStyle = '#94a3b8';
+  [0, 64, 128, 192, 255].forEach((v) => {
+    ctx.textAlign = v === 0 ? 'left' : v === 255 ? 'right' : 'center';
+    ctx.fillText(String(v), (v + 0.5) * bw, H - 3);
+  });
+}
+
+(function bindHistogramHover() {
+  const canvas = $('histCanvas');
+  const tip = $('histTooltip');
+  canvas.addEventListener('mousemove', (e) => {
+    const hist = state.analysisData?.ipcv?.histogram;
+    if (!hist) return;
+    const r = canvas.getBoundingClientRect();
+    const bin = clamp(Math.floor(((e.clientX - r.left) / r.width) * 256), 0, 255);
+    const t = state.analysisData.ipcv.otsu_threshold;
+    tip.textContent = `DL ${bin} · ${hist[bin].toLocaleString('en-US')} px · ${bin <= t ? 'background' : 'module / hot'}`;
+    tip.classList.remove('hidden');
+    const x = e.clientX - r.left;
+    tip.style.left = `${clamp(x - tip.offsetWidth / 2, 0, r.width - tip.offsetWidth)}px`;
+    tip.style.top = '-26px';
+    drawHistogram(bin);
+  });
+  canvas.addEventListener('mouseleave', () => { tip.classList.add('hidden'); drawHistogram(); });
+})();
+
+window.addEventListener('resize', () => drawHistogram());
+
+$('geoOverlayBtn').addEventListener('click', () => {
+  if (!state.analysisData) return;
+  setLayer('contours');
+  viewportContainer.scrollIntoView({ behavior: 'smooth', block: 'center' });
+});
+
+// Economics what-if
+function readEcon() {
+  const num = (id, lo, hi, fallback) => {
+    const v = parseFloat($(id).value);
+    return Number.isFinite(v) ? clamp(v, lo, hi) : fallback;
+  };
+  state.econ = {
+    module_watts: num('econWatts', 10, 1000, ECON_DEFAULTS.module_watts),
+    tariff: num('econTariff', 0, 5, ECON_DEFAULTS.tariff),
+    sun_hours: num('econSun', 0.5, 12, ECON_DEFAULTS.sun_hours),
+    modules_per_string: Math.round(num('econString', 1, 60, ECON_DEFAULTS.modules_per_string)),
+  };
+  storageSet('helios.econ', state.econ);
+  if (state.analysisData) refreshAll();
+}
+function writeEcon() {
+  $('econWatts').value = state.econ.module_watts;
+  $('econTariff').value = state.econ.tariff;
+  $('econSun').value = state.econ.sun_hours;
+  $('econString').value = state.econ.modules_per_string;
+}
+['econWatts', 'econTariff', 'econSun', 'econString'].forEach((id) => $(id).addEventListener('input', readEcon));
+$('econReset').addEventListener('click', () => { state.econ = { ...ECON_DEFAULTS }; writeEcon(); readEcon(); });
+
+// ─────────────────────────────────────────────────────────────────────────
+// Benchmark dialog
+// ─────────────────────────────────────────────────────────────────────────
+$('btnBenchmark').addEventListener('click', async () => {
+  const dlg = $('benchmarkDialog');
+  const body = $('benchmarkBody');
+  const summary = $('benchmarkSummary');
+  summary.innerHTML = '';
+  body.textContent = 'Loading…';
+  dlg.showModal();
+  try {
+    const res = await fetch('/api/v1/benchmark', { cache: 'no-store' });
+    if (!res.ok) throw new Error(await readError(res));
+    const m = await res.json();
+    const tiles = [
+      ['Effective FPS', m.fps.effective.toFixed(2)],
+      ['Mean latency', `${m.latency_ms.total.mean.toFixed(0)} ms`],
+      ['Parameters', `${m.model.parameters_m.toFixed(1)} M`],
+      ['GFLOPs @640', m.model.gflops_640 ?? 'n/a'],
+    ];
+    summary.innerHTML = tiles.map(([k, v]) => `<div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800"><div class="text-[10px] uppercase text-slate-500">${k}</div><div class="text-lg font-bold text-white">${escapeHtml(v)}</div></div>`).join('');
+    body.innerHTML = `<img src="/api/v1/benchmark/report?ts=${Date.now()}" alt="Benchmark performance card" class="w-full rounded-xl border border-slate-800">
+      <p class="text-[11px] font-mono text-slate-500 mt-2">Generated ${escapeHtml(m.generated_at)} on ${escapeHtml(m.config.device)} · ${m.config.iterations} timed iterations · deterministic: ${m.deterministic ? 'yes' : 'no'}</p>`;
+  } catch (err) {
+    body.innerHTML = `<div class="p-6 rounded-xl border border-dashed border-slate-700 text-center">
+      <p class="text-slate-300">No benchmark has been recorded yet.</p>
+      <p class="text-[11px] font-mono text-slate-500 mt-2">Run <span class="text-amber-300">python evaluate_benchmark.py</span> in the project folder, then reopen this card.</p></div>`;
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Exports
+// ─────────────────────────────────────────────────────────────────────────
+function csvCell(v) {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+$('btnExportCsv').addEventListener('click', () => {
+  if (!state.analysisData) return;
+  const header = ['id', 'class_code', 'classification', 'iec_class', 'confidence_pct', 'delta_t_est_c', 'image_contrast_dl',
+    'delta_t_image_c', 'power_loss_w', 'x_px', 'y_px', 'width_px', 'height_px', 'priority', 'field_action'];
+  const rows = thresholdDetections().map((d) => {
+    const b = d.bbox_pixels;
+    return [d.id, d.code, d.class_name, d.iec_class, d.confidence, d.delta_t_celsius, d.thermal_signature?.contrast_dl ?? '',
+      d.thermal_signature?.delta_t_image_celsius ?? '', lossWatts(d).toFixed(1), Math.round((b.x1 + b.x2) / 2),
+      Math.round((b.y1 + b.y2) / 2), b.x2 - b.x1, b.y2 - b.y1, SEVERITY[d.iec_class]?.priority ?? '', d.field_action];
+  });
+  download(`helios_defect_register_${reportStamp()}.csv`, [header, ...rows].map((r) => r.map(csvCell).join(',')).join('\n'), 'text/csv');
+});
+$('btnExportJson').addEventListener('click', () => {
+  if (!state.analysisData) return;
+  const strip = (obj) => JSON.parse(JSON.stringify(obj, (k, v) => (typeof k === 'string' && k.endsWith('base64') ? undefined : v)));
+  const d = state.analysisData;
+  const payload = {
+    exported_at: new Date().toISOString(),
+    report: state.report,
+    economics: state.econ,
+    confidence_threshold: state.confThreshold,
+    kpis: state.kpis,
+    detections: strip(thresholdDetections()),
+    ipcv: d.ipcv,
+    geometry: strip(d.geometry || {}),
+    analysis: d.analysis,
+    timing_ms: d.timing_ms,
+    model_info: d.model_info,
+    source: d.source,
+  };
+  download(`helios_inspection_${reportStamp()}.json`, JSON.stringify(payload, null, 2), 'application/json');
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Printable certificate
+// ─────────────────────────────────────────────────────────────────────────
+function todayIso() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function reportStamp() {
+  return (state.report.date || todayIso()).replace(/-/g, '');
+}
+function hashString(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(36).toUpperCase().padStart(6, '0').slice(-6);
+}
+function setReportField(name, value) {
+  $$(`#printReport [data-r="${name}"]`).forEach((el) => { el.textContent = value; });
+}
+
+let reportTimer = null;
+function scheduleReport() {
+  clearTimeout(reportTimer);
+  reportTimer = setTimeout(populateReport, 120);
+}
+
+let composedFigureKey = '';
+function composeReportFigure() {
+  const data = state.analysisData;
+  if (!data) return;
+  // Re-encoding during `beforeprint` could blank the figure in the print snapshot; only redraw on change.
+  const key = data.raw_image_base64.length + '|' + thresholdDetections().map((d) => d.id).join(',');
+  if (key === composedFigureKey) return;
+  composedFigureKey = key;
+  const img = new Image();
+  img.onload = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    ctx.font = '600 11px "JetBrains Mono", monospace';
+    thresholdDetections().forEach((d) => {
+      const b = d.bbox_pixels;
+      ctx.strokeStyle = d.color_hex;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
+      const label = `#${d.index}`;
+      const tw = ctx.measureText(label).width + 6;
+      const ty = b.y1 > 16 ? b.y1 - 14 : b.y2 + 1;
+      ctx.fillStyle = d.color_hex;
+      ctx.fillRect(b.x1 - 1, ty, tw, 13);
+      ctx.fillStyle = '#0b0b0b';
+      ctx.fillText(label, b.x1 + 2, ty + 10);
+    });
+    $('rptFigure').src = canvas.toDataURL('image/jpeg', 0.92);
+  };
+  img.src = data.raw_image_base64;
+}
+
+function populateReport() {
+  const r = state.report;
+  const data = state.analysisData;
+  const issued = new Date().toLocaleString('en-GB', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const dets = thresholdDetections();
+  const k = computeKpis(dets);
+  const certNo = `HEL-${reportStamp()}-${hashString(JSON.stringify(dets.map((d) => [d.id, d.class_id, d.confidence])) + (r.plant || ''))}`;
+
+  setReportField('certNo', certNo);
+  setReportField('issued', issued);
+  setReportField('plant', r.plant || '—');
+  setReportField('site', r.site || '—');
+  setReportField('date', r.date ? new Date(r.date + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' }) : '—');
+  setReportField('inspector', r.inspector || '—');
+  setReportField('cert', r.cert || '—');
+  setReportField('payload', r.payload || '—');
+  setReportField('engine', 'YOLOv9 thermal detector (Th_G_v9.pt) + classical IPCV');
+  setReportField('econ', `${state.econ.module_watts} Wp/module · ${state.econ.sun_hours} PSH · $${state.econ.tariff}/kWh`);
+
+  const body1 = $('rptBody1');
+  if (!data) {
+    body1.dataset.empty = '1';
+    setReportField('source', '—');
+    setReportField('threshold', '—');
+    $('rptSeverity').innerHTML = '';
+    $('rptTableBody').innerHTML = '<tr><td colspan="7"><div class="rpt-empty">No inspection loaded. Run an analysis in the cockpit before printing.</div></td></tr>';
+    $('rptMethod').innerHTML = '';
+    return;
+  }
+
+  const src = data.source?.name || 'frame';
+  const od = data.original_dimensions, id = data.image_dimensions;
+  setReportField('source', `${src} · ${od.width}×${od.height} px`);
+  setReportField('threshold', `≥ ${Math.round(state.confThreshold * 100)}% · class-agnostic NMS IoU ${data.analysis?.nms_iou ?? 0.7}`);
+  setReportField('health', `${k.health}%`);
+  setReportField('healthStatus', k.status);
+  setReportField('total', String(k.total));
+  setReportField('breakdown', `${k.critical} critical · ${k.medium} medium · ${k.minor} low`);
+  setReportField('critical', String(k.critical));
+  setReportField('watts', `${fmtInt(k.watts)} W`);
+  setReportField('kw', `${(k.watts / 1000).toFixed(2)} kW peak dissipated`);
+  setReportField('usd', fmtUsd(k.usd));
+  setReportField('kwh', `${fmtInt(k.annualKwh)} kWh/yr`);
+  setReportField('primary', k.primary);
+  setReportField('figCaption', `Figure 1 — ${src}, ${id.width}×${id.height} analysis frame. Boxes: IEC Class 3 red · Class 2 amber · Class 1 blue; numbers match the defect register.`);
+  setReportField('recommendation', k.critical
+    ? `${k.critical} Class 3 anomal${k.critical === 1 ? 'y requires' : 'ies require'} isolation and repair within 24 h. Schedule Class 2 repairs within 30 days and re-fly the block after remediation.`
+    : k.medium ? 'No critical anomalies. Schedule Class 2 repairs within 30 days and re-survey after remediation.'
+      : 'No actionable anomalies above threshold. Continue routine thermographic monitoring.');
+
+  const maxCount = Math.max(1, k.critical, k.medium, k.minor);
+  $('rptSeverity').innerHTML = [['Class 3', 'Critical', k.critical, '#dc2626'], ['Class 2', 'Medium', k.medium, '#d97706'], ['Class 1', 'Low', k.minor, '#2563eb']]
+    .map(([cls, lbl, n, c]) => `<div class="rpt-sev-row"><span style="width:118px;white-space:nowrap">${cls} · ${lbl}</span><span class="rpt-sev-bar"><i style="width:${(n / maxCount) * 100}%;background:${c}"></i></span><b style="width:18px;text-align:right">${n}</b></div>`).join('');
+
+  $('rptTableBody').innerHTML = dets.length ? dets.map((d) => {
+    const sev = SEVERITY[d.iec_class] || SEVERITY['Class 1'];
+    const sig = d.thermal_signature;
+    const b = d.bbox_pixels;
+    return `<tr>
+      <td class="mono"><b>${d.index}</b></td>
+      <td class="mono">${escapeHtml(d.id)}<br><span class="dim">${escapeHtml(d.code)}</span></td>
+      <td><div class="rpt-cls">${d.crop_base64 ? `<img class="rpt-thumb" src="${d.crop_base64}" alt="">` : ''}<div><b>${escapeHtml(d.class_name)}</b><br><span class="dim">${d.confidence}% @ ${Math.round((b.x1 + b.x2) / 2)},${Math.round((b.y1 + b.y2) / 2)}</span></div></div></td>
+      <td><span class="rpt-sev" style="background:${sev.color}">${escapeHtml(d.iec_class)}</span><br><b>${sev.priority.split(' · ')[1] || ''}</b> <span class="dim">${sev.priority.split(' · ')[0]}</span></td>
+      <td class="mono nowrap">+${d.delta_t_celsius}&nbsp;°C${sig ? `<br><span class="dim">img +${sig.delta_t_image_celsius}&nbsp;°C</span>` : ''}</td>
+      <td class="mono nowrap">−${fmt1(lossWatts(d))}&nbsp;W<br><span class="dim">${d.power_loss_pct}%${d.loss_scope === 'string' ? ' str.' : ''}</span></td>
+      <td>${escapeHtml(d.field_action)}</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="7"><div class="rpt-empty">No anomalies detected above the selected confidence threshold.</div></td></tr>';
+
+  const ip = data.ipcv || {};
+  const g = data.geometry || {};
+  $('rptMethod').innerHTML = `
+    <div><b>Layer 1 — Classical IPCV.</b> CLAHE (clip ${ip.clahe?.clip_limit ?? 2.5}, ${(ip.clahe?.tile_grid || [8, 8]).join('×')} tiles) + Ironbow palette;
+      3×3 Sobel gradient magnitude (mean |∇I| ${ip.sobel_mean_magnitude ?? '—'}); Gaussian 5×5 + Otsu threshold t* = ${ip.otsu_threshold ?? '—'}
+      (η = ${ip.otsu_separability_eta ?? '—'}, verified by an independent NumPy derivation). Homography rectification of ${g.modules_detected ?? 0} module tables.</div>
+    <div><b>Layer 2 — Deep detection.</b> Pre-trained YOLOv9 thermal detector (Th_G_v9.pt, 9 PV fault classes), aspect-true ${id.width}×${id.height} input,
+      class-agnostic NMS so a module is never double-counted. Pipeline latency ${data.timing_ms?.total?.toFixed(0) ?? '—'} ms on ${escapeHtml(data.model_info?.device || 'cpu')}.</div>
+    <div><b>Layer 3 — IEC TS 62446-3 grading.</b> Fault classes mapped to Class 1–3. Est. ΔT is a class-conditional prior scaled by confidence;
+      "img" ΔT is measured as hotspot P98 minus Otsu-segmented healthy module surface, assuming a ${data.analysis?.radiometric_span_celsius ?? 40} °C linear span.</div>
+    <div><b>Economics &amp; limitations.</b> P = Σ Wp·loss%·n<sub>modules</sub>; E = P·PSH·365; $ = E·tariff. Non-radiometric frames give relative temperatures only —
+      confirm Class 3 findings with a handheld radiometric camera and I-V curve trace before replacement.</div>`;
+  composeReportFigure();
+}
+
+function openReportDialog() {
+  const r = state.report;
+  $('rptPlant').value = r.plant || '';
+  $('rptSite').value = r.site || '';
+  $('rptDate').value = r.date || todayIso();
+  $('rptInspector').value = r.inspector || '';
+  $('rptCert').value = r.cert || '';
+  $('rptPayload').value = r.payload || '';
+  $('reportDialog').showModal();
+}
+
+$('reportDialog').addEventListener('close', () => {
+  const dlg = $('reportDialog');
+  const choice = dlg.returnValue;
+  dlg.returnValue = '';
+  if (choice !== 'print') return;
+  state.report = {
+    plant: $('rptPlant').value.trim(),
+    site: $('rptSite').value.trim(),
+    date: $('rptDate').value || todayIso(),
+    inspector: $('rptInspector').value.trim(),
+    cert: $('rptCert').value.trim(),
+    payload: $('rptPayload').value.trim(),
+  };
+  storageSet('helios.report', state.report);
+  populateReport();
+  // Let the composited figure decode before the print snapshot is taken.
+  setTimeout(() => window.print(), 350);
+});
+
+$('btnExportReport').addEventListener('click', async () => {
+  if (tour.active) pauseTour(true);
+  if (!state.analysisData) {
+    toast('Loading the sample flight first…');
+    const ok = await loadSampleFlight();
+    if (!ok) return;
+  }
+  openReportDialog();
+});
+window.addEventListener('beforeprint', populateReport);
+
+// ─────────────────────────────────────────────────────────────────────────
+// Input wiring
+// ─────────────────────────────────────────────────────────────────────────
+viewportContainer.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  dropZone.classList.add('border-amber-400', 'bg-amber-500/5');
+  viewportContainer.classList.add('ring-2', 'ring-amber-500/50');
+});
+viewportContainer.addEventListener('dragleave', (e) => {
+  if (e.target !== viewportContainer && viewportContainer.contains(e.relatedTarget)) return;
+  dropZone.classList.remove('border-amber-400', 'bg-amber-500/5');
+  viewportContainer.classList.remove('ring-2', 'ring-amber-500/50');
+});
+viewportContainer.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('border-amber-400', 'bg-amber-500/5');
+  viewportContainer.classList.remove('ring-2', 'ring-amber-500/50');
+  if (e.dataTransfer.files && e.dataTransfer.files[0]) uploadFile(e.dataTransfer.files[0]);
+});
+dropZone.addEventListener('click', (e) => { if (e.target === dropZone || !e.target.closest('button')) fileInput.click(); });
+dropZone.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } });
+$('btnBrowse').addEventListener('click', (e) => { e.stopPropagation(); fileInput.click(); });
+$('btnUpload').addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => { if (fileInput.files && fileInput.files[0]) uploadFile(fileInput.files[0]); });
+$('btnLoadSample').addEventListener('click', loadSampleFlight);
+$('btnDropSample').addEventListener('click', (e) => { e.stopPropagation(); loadSampleFlight(); });
+
+$$('.layer-btn').forEach((btn) => btn.addEventListener('click', () => setLayer(btn.dataset.layer)));
+
+confSlider.addEventListener('input', (e) => {
+  const val = parseInt(e.target.value, 10);
+  state.confThreshold = val / 100.0;
+  $('confSliderVal').textContent = `${val}%`;
+  refreshAll();
+});
+
+$$('.filter-pill').forEach((btn) => btn.addEventListener('click', () => {
+  $$('.filter-pill').forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
+  state.activeFilter = btn.dataset.filter;
+  refreshAll();
+}));
+
+$$('.crop-btn').forEach((btn) => btn.addEventListener('click', () => {
+  state.cropMode = btn.dataset.crop;
+  $$('.crop-btn').forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
+  updateCropDisplay();
+}));
+
+$('btnPrevDefect').addEventListener('click', () => navigateDefect(-1));
+$('btnNextDefect').addEventListener('click', () => navigateDefect(1));
+$('btnZoomDefect').addEventListener('click', () => focusOnDetection(findDetection(state.selectedDefectId)));
+$('btnFocus').addEventListener('click', () => setFocusMode(!state.focusMode));
+$('btnResetView').addEventListener('click', () => { setFocusMode(false); resetView(); });
+$('btnZoomIn').addEventListener('click', () => zoomAt(1.35, state.stageSize.w / 2, state.stageSize.h / 2, true));
+$('btnZoomOut').addEventListener('click', () => zoomAt(1 / 1.35, state.stageSize.w / 2, state.stageSize.h / 2, true));
+
+// Keyboard shortcuts for presenters
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (document.querySelector('dialog[open]')) return;
+  const tag = (e.target.tagName || '').toLowerCase();
+  if (['input', 'select', 'textarea'].includes(tag) || e.target.isContentEditable) return;
+
+  if (e.key === 't' || e.key === 'T') { e.preventDefault(); startTour(); return; }
+  if (!state.analysisData) return;
+  const n = parseInt(e.key, 10);
+  if (n >= 1 && n <= LAYER_ORDER.length) { setLayer(LAYER_ORDER[n - 1]); return; }
+  switch (e.key) {
+    case 'ArrowRight':
+      e.preventDefault();
+      if (tour.active) $('tourNext').click(); else navigateDefect(1);
+      break;
+    case 'ArrowLeft':
+      e.preventDefault();
+      if (tour.active) $('tourPrev').click(); else navigateDefect(-1);
+      break;
+    case ' ':
+      if (tour.active) { e.preventDefault(); pauseTour(!tour.paused); }
+      break;
+    case 'Escape':
+      if (tour.active) endTour(false); else { setFocusMode(false); resetView(); }
+      break;
+    case 'f': case 'F':
+      setFocusMode(!state.focusMode);
+      break;
+    default:
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────────────────────────────────
+state.econ = storageGet('helios.econ', ECON_DEFAULTS);
+state.report = storageGet('helios.report', { ...REPORT_DEFAULTS, date: todayIso() });
+writeEcon();
+setLayer('raw');
+populateReport();
+refreshIcons();
+checkHealth();
+
+// Deep links for presentations: /?sample=1 opens straight into the demo, &layer=<raw|ironbow|sobel|otsu|contours|bbox>
+// selects the starting layer, and &tour=1 also starts the guided tour.
+(function handleDeepLinks() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('sample') !== '1') return;
+  loadSampleFlight().then((ok) => {
+    if (!ok) return;
+    const layer = params.get('layer');
+    if (layer && LAYERS[layer]) setLayer(layer);
+    if (params.get('tour') === '1') startTour();
+  });
+})();
+</script>
+</body>
+</html>
